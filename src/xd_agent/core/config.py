@@ -40,7 +40,8 @@ class AgentSettings(BaseModel):
     provider、model、api_key、base_url 指定模型服务；workspace_dir 和 session_db
     指定默认工作区及会话数据库。max_turns 限制模型轮数；max_context_chars
     与 memory_messages 限制上下文；command_timeout_seconds 和
-    max_tool_output_chars 限制工具执行。价格及 currency 仅用于成本估算。
+    max_tool_output_chars 限制工具执行；max_exploration_summary_chars 限制调查报告，
+    memory_summary_chars 限制滚动历史摘要。价格及 currency 仅用于成本估算。
     """
 
     provider: Literal["openai_compatible", "anthropic_compatible"] = "openai_compatible"
@@ -54,6 +55,8 @@ class AgentSettings(BaseModel):
     memory_messages: int = Field(default=40, ge=2)
     command_timeout_seconds: int = Field(default=30, ge=1, le=600)
     max_tool_output_chars: int = Field(default=8_000, ge=100)
+    max_exploration_summary_chars: int = Field(default=3_000, ge=200)
+    memory_summary_chars: int = Field(default=6_000, ge=100)
     input_price_per_million: float = Field(default=0.15, ge=0)
     output_price_per_million: float = Field(default=0.15, ge=0)
     currency: str = "CNY"

@@ -42,3 +42,5 @@ agent:
   memory_messages: 40
   command_timeout_seconds: 30
   max_tool_output_chars: 8000
+  max_exploration_summary_chars: 3000
+  memory_summary_chars: 6000

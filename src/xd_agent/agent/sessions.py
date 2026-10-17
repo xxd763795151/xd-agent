@@ -53,6 +53,11 @@ class SessionStore:
                 event_id TEXT NOT NULL,
                 PRIMARY KEY (channel, event_id)
             );
+            CREATE TABLE IF NOT EXISTS session_memory (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+                summary TEXT NOT NULL,
+                message_count INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS approvals (
                 id TEXT PRIMARY KEY,
                 session_id TEXT,
@@ -280,6 +285,24 @@ class SessionStore:
                 "UPDATE sessions SET input_tokens = input_tokens + ?, "
                 "output_tokens = output_tokens + ?, cost = cost + ? WHERE id = ?",
                 (usage.input_tokens, usage.output_tokens, cost, session_id),
+            )
+
+    def load_memory(self, session_id: str) -> tuple[str, int]:
+        """读取摘要及其覆盖的历史消息数；兼容尚无摘要的旧会话。"""
+        row = self._connection.execute(
+            "SELECT summary, message_count FROM session_memory WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return (str(row[0]), int(row[1])) if row else ("", 0)
+
+    def save_memory(self, session_id: str, summary: str, message_count: int) -> None:
+        """原子保存摘要检查点，不删除原始会话消息。"""
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO session_memory (session_id, summary, message_count) VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "summary = excluded.summary, message_count = excluded.message_count",
+                (session_id, summary, message_count),
             )
 
     def claim_event(self, channel: str, event_id: str) -> bool:

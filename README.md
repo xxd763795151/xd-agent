@@ -109,7 +109,13 @@ uv run --frozen --extra wecom uvicorn xd_agent.web.app:create_app --factory --ho
 
 ## 工具与评测
 
-提供 `read_file`、`list_files`、`search_text`、`write_file`、`edit_file`、`run_command` 和只读的 `explore_workspace`。文件工具将路径限制在工作区中；`run_command` 会在宿主机执行 PowerShell（Windows）或 Bash（Linux/macOS），CLI 使用者应只向可信任务开放。命令失败、超时、重复工具失败以及最大轮数均会明确反馈。
+提供 `read_file`、`read_tool_output`、`list_files`、`search_text`、`write_file`、`edit_file`、`run_command` 和只读的 `explore_workspace`。文件工具将路径限制在工作区中；`run_command` 会在宿主机执行 PowerShell（Windows）或 Bash（Linux/macOS），CLI 使用者应只向可信任务开放。命令失败、超时、重复工具失败以及最大轮数均会明确反馈。
+
+工具成功、失败和审批拒绝的结果统一受 `max_tool_output_chars`（默认 8000 字符）限制，实际每页预算还不超过 `max_context_chars` 的四分之一。长结果保存在工作区 `.xd-agent/tool-outputs/`，返回预览和存档 ID；模型可用 `read_tool_output(output_id, offset, limit)` 按需取回。命令输出流式存档，避免完整日志占用内存；`read_file(path, offset, limit)` 可直接分页读取原文件。`offset` 按 Unicode 字符计数，续读提示也计入页面长度，按提示继续不会跳过正文。小于续读提示长度的页面会返回参数错误。
+
+大量文件调查优先使用 `explore_workspace`。探索助手只持有自己的局部历史，主会话仅接收“结论、关键证据、未确认事项”报告，默认上限由 `max_exploration_summary_chars` 控制（3000 字符），同时服从工具输出预算。过长报告保留各部分摘要，并附完整报告的存档 ID；模型没有提供结构化证据时会明确标记待核实。只读探索助手可分页读取存档，不能调用命令和编辑工具。
+
+主会话和探索助手在达到消息数或字符预算时，会先调用模型压缩旧历史，再移除对应消息；一个助手消息中的工具调用及其结果作为整体保留或压缩。摘要要求保留用户目标与约束、决策、文件位置、验证结果和未完成事项，主会话摘要通过 `session_memory` 表持久化，原始 `messages` 不删除。`memory_summary_chars` 默认 6000 字符，有效摘要预算不超过上下文的八分之一。摘要模型调用会产生额外用量，并计入主会话；摘要请求分块限长，失败时保留原历史并终止本次运行。摘要仍可能省略细节，需要时应重新核实文件和工具存档。
 
 所有工具调用都在 `ToolRegistry.execute()` 的执行入口检查审批。新增工具默认需要审批，只有显式声明 `read_only = True` 的无副作用工具才能免审。只读探索助手仅注册文件读取、列表和搜索工具。
 

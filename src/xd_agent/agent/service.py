@@ -13,6 +13,7 @@ from xd_agent.agent.tools import (
     EditFile,
     ListFiles,
     ReadFile,
+    ReadToolOutput,
     RunCommand,
     SearchText,
     ToolRegistry,
@@ -63,18 +64,35 @@ class AgentService:
         async with lock:
             token = session_id_context.set(session_id)
             try:
-                files = WorkspaceFiles(root, self.settings.max_tool_output_chars)
-                read_only = ToolRegistry([ReadFile(files), ListFiles(files), SearchText(files)])
+                files = WorkspaceFiles(
+                    root,
+                    min(self.settings.max_tool_output_chars, self.settings.max_context_chars // 4),
+                )
+                read_only = ToolRegistry(
+                    [
+                        ReadFile(files),
+                        ListFiles(files),
+                        SearchText(files),
+                        ReadToolOutput(files.outputs),
+                    ],
+                    outputs=files.outputs,
+                )
                 registry = ToolRegistry(
                     [
                         ReadFile(files),
+                        ReadToolOutput(files.outputs),
                         ListFiles(files),
                         SearchText(files),
                         WriteFile(files),
                         EditFile(files),
                         RunCommand(files, self.settings),
                         ExploreWorkspace(
-                            self.provider, read_only, self.settings, self.store, session_id
+                            self.provider,
+                            read_only,
+                            self.settings,
+                            self.store,
+                            session_id,
+                            outputs=files.outputs,
                         ),
                     ],
                     approval=approval,
@@ -82,6 +100,7 @@ class AgentService:
                     chat_id=chat_id,
                     store=self.store,
                     session_id=session_id,
+                    outputs=files.outputs,
                 )
                 engine = AgentEngine(self.provider, self.store, registry, self.settings)
                 return await engine.run(

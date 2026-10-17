@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from xd_agent.agent.context import build_system_prompt, compose_context
+from xd_agent.agent.context import ContextMemory, build_system_prompt
 from xd_agent.agent.models import Message, Usage
 from xd_agent.agent.provider import ModelProvider
 from xd_agent.agent.reporting import AgentEvent, Reporter
@@ -66,9 +66,27 @@ class AgentEngine:
         }
         last_failure: str | None = None
         consecutive_failures = 0
+        summary, summarized_messages = self.store.load_memory(session_id)
+        memory = ContextMemory(
+            self.provider,
+            self.settings,
+            summary=summary,
+            summarized_messages=summarized_messages,
+            on_usage=lambda usage: self.store.record_usage(session_id, usage, self._cost(usage)),
+        )
         try:
             for turn in range(1, self.settings.max_turns + 1):
-                context = compose_context(system, history, prompt, self.settings)
+                previous_count = memory.summarized_messages
+                previous_summary = memory.summary
+                context = await memory.prepare(system, history, prompt)
+                if (memory.summarized_messages, memory.summary) != (
+                    previous_count,
+                    previous_summary,
+                ):
+                    self.store.save_memory(session_id, memory.summary, memory.summarized_messages)
+                    await reporter.emit(
+                        AgentEvent("notice", "已将较早历史整理为任务摘要，原始记录仍保留。")
+                    )
                 reply = await self.provider.generate(context, self.registry.definitions())
                 cost = self._cost(reply.usage)
                 self.store.record_usage(session_id, reply.usage, cost)

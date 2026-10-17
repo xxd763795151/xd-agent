@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import copy
 import os
 import stat
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 from xd_agent.agent.approval import ApprovalDecision, ApprovalGate, ApprovalRequest
 from xd_agent.agent.models import ToolCall, ToolResult
+from xd_agent.agent.outputs import ToolOutputStore, page_arguments, read_page
 from xd_agent.agent.reporting import NullReporter, Reporter
 from xd_agent.agent.sessions import SessionStore
 from xd_agent.core.config import AgentSettings
@@ -35,6 +37,7 @@ class WorkspaceFiles:
     def __init__(self, root: Path, output_limit: int) -> None:
         self.root = root.resolve()
         self.output_limit = output_limit
+        self.outputs = ToolOutputStore(self.root, output_limit)
 
     def resolve(self, raw: str) -> Path:
         """解析相对路径，并拒绝绝对路径及解析后越界的路径。"""
@@ -51,10 +54,14 @@ class ReadFile:
 
     name = "read_file"
     read_only = True
-    description = "读取工作区内一个文本文件的内容。"
+    description = "分页读取工作区文本文件；offset 是字符偏移，按续读提示取回后续内容。"
     parameters = {
         "type": "object",
-        "properties": {"path": {"type": "string"}},
+        "properties": {
+            "path": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1},
+        },
         "required": ["path"],
     }
 
@@ -62,13 +69,39 @@ class ReadFile:
         self.files = files
 
     async def execute(self, arguments: dict[str, Any]) -> str:
-        """读取文件，并在超过输出上限时截断。"""
+        """分页读取文件，将续读提示也纳入工具输出预算。"""
         path = self.files.resolve(str(arguments["path"]))
-        with path.open("r", encoding="utf-8") as stream:
-            content = stream.read(self.files.output_limit + 1)
-        if len(content) > self.files.output_limit:
-            return content[: self.files.output_limit] + "\n[文件内容已截断]"
-        return content
+        offset, limit = page_arguments(arguments, self.files.output_limit)
+        return read_page(
+            path,
+            offset,
+            limit,
+            lambda next_offset: f"\n[read_file: 同一 path, offset={next_offset}]",
+        )
+
+
+class ReadToolOutput:
+    """按字符分页取回已存档的长输出，不能访问工作区外的文件。"""
+
+    name = "read_tool_output"
+    read_only = True
+    description = "分页读取工具输出存档；使用输出提示中的 output_id 和 offset。"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "output_id": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+        "required": ["output_id"],
+    }
+
+    def __init__(self, outputs: ToolOutputStore) -> None:
+        self.outputs = outputs
+
+    async def execute(self, arguments: dict[str, Any]) -> str:
+        offset, limit = page_arguments(arguments, self.outputs.limit)
+        return self.outputs.read(str(arguments["output_id"]), offset, limit)
 
 
 class WriteFile:
@@ -279,6 +312,7 @@ class RunCommand:
             )
         else:
             shell = ["/bin/bash", "-lc"]
+        output_id, output_path = self.files.outputs.create()
         process = await asyncio.create_subprocess_exec(
             *shell,
             command,
@@ -287,26 +321,29 @@ class RunCommand:
             stderr=asyncio.subprocess.STDOUT,
         )
 
-        async def collect_output() -> bytes:
-            """持续排空子进程输出，仅保留配置允许的前缀。"""
+        async def collect_output() -> None:
+            """流式存档完整输出，内存只保留一个数据块。"""
             assert process.stdout is not None
-            captured = bytearray()
-            while chunk := await process.stdout.read(4096):
-                remaining = self.files.output_limit - len(captured)
-                if remaining > 0:
-                    captured.extend(chunk[:remaining])
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            with output_path.open("w", encoding="utf-8", newline="") as stream:
+                while chunk := await process.stdout.read(4096):
+                    stream.write(decoder.decode(chunk))
+                stream.write(decoder.decode(b"", final=True))
             await process.wait()
-            return bytes(captured)
 
         try:
-            output = await asyncio.wait_for(
-                collect_output(), timeout=self.settings.command_timeout_seconds
-            )
+            await asyncio.wait_for(collect_output(), timeout=self.settings.command_timeout_seconds)
         except TimeoutError as exc:
-            process.kill()
+            if process.returncode is None:
+                process.kill()
             await process.communicate()
-            raise RuntimeError("command timed out") from exc
-        text = output.decode("utf-8", errors="replace")
+            raise RuntimeError(f"command timed out; output_id={output_id}") from exc
+        except BaseException:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+            raise
+        text = self.files.outputs.read(output_id)
         if process.returncode != 0:
             raise RuntimeError(f"command exited with status {process.returncode}: {text}")
         return text or "命令执行成功，无输出"
@@ -324,6 +361,7 @@ class ToolRegistry:
         chat_id: str | None = None,
         store: SessionStore | None = None,
         session_id: str | None = None,
+        outputs: ToolOutputStore | None = None,
     ) -> None:
         self._tools = {tool.name: tool for tool in tools}
         self.approval = approval
@@ -331,6 +369,15 @@ class ToolRegistry:
         self.chat_id = chat_id
         self.store = store
         self.session_id = session_id
+        self.outputs = outputs
+
+    def _result(self, call: ToolCall, output: str, is_error: bool) -> ToolResult:
+        """所有成功、拒绝和异常结果均在同一出口限长。"""
+        if self.outputs is not None:
+            output = self.outputs.bound(output)
+        elif len(output) > 8000:
+            output = output[:7980] + "\n[工具输出已截断]"
+        return ToolResult(call.id, call.name, output, is_error)
 
     def definitions(self) -> list[dict[str, Any]]:
         """生成发送给模型的工具名称、说明和参数模式。"""
@@ -343,7 +390,7 @@ class ToolRegistry:
         """在实际执行入口审批，缺少策略时拒绝有副作用或未分类的工具。"""
         tool = self._tools.get(call.name)
         if tool is None:
-            return ToolResult(call.id, call.name, f"未知工具：{call.name}", True)
+            return self._result(call, f"未知工具：{call.name}", True)
         approval_id: str | None = None
         executing = False
         try:
@@ -378,14 +425,14 @@ class ToolRegistry:
                         approval_id, decision.status, decision.reason, user_id=decision.user_id
                     )
                 if not decision.allowed:
-                    return ToolResult(call.id, call.name, decision.reason, True)
+                    return self._result(call, decision.reason, True)
                 if self.store is not None:
                     self.store.record_approval_execution(approval_id, "running")
                 executing = True
             output = await tool.execute(call.arguments)
             if approval_id is not None and self.store is not None:
                 self.store.record_approval_execution(approval_id, "succeeded")
-            return ToolResult(call.id, call.name, output, False)
+            return self._result(call, output, False)
         except asyncio.CancelledError:
             if approval_id is not None and self.store is not None:
                 if executing:
@@ -407,4 +454,4 @@ class ToolRegistry:
                     self.store.record_approval_execution(approval_id, "failed", error)
                 else:
                     self.store.record_approval_decision(approval_id, "error", error)
-            return ToolResult(call.id, call.name, f"{type(exc).__name__}: {exc}", True)
+            return self._result(call, f"{type(exc).__name__}: {exc}", True)
