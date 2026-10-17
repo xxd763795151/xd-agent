@@ -5,8 +5,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from xd_agent.agent.models import Message, ToolResult, Usage
+from xd_agent.agent.models import Message, ToolCall, ToolResult, Usage
 
 
 @dataclass(slots=True, frozen=True)
@@ -52,8 +53,170 @@ class SessionStore:
                 event_id TEXT NOT NULL,
                 PRIMARY KEY (channel, event_id)
             );
+            CREATE TABLE IF NOT EXISTS approvals (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                chat_id TEXT,
+                tool_call_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                arguments TEXT NOT NULL,
+                policy TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_at TEXT NOT NULL,
+                decided_at TEXT,
+                decided_by TEXT,
+                reason TEXT NOT NULL DEFAULT '',
+                execution_status TEXT NOT NULL DEFAULT 'not_started',
+                execution_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS approval_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                approval_id TEXT NOT NULL REFERENCES approvals(id),
+                occurred_at TEXT NOT NULL,
+                event TEXT NOT NULL,
+                user_id TEXT,
+                chat_id TEXT,
+                detail TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS approval_events_by_request
+                ON approval_events(approval_id, id);
             """
         )
+        self._recover_approvals()
+
+    def _recover_approvals(self) -> None:
+        """单进程重启时终止遗留审批及未知执行，绝不复用旧批准。"""
+        with self._connection:
+            rows = self._connection.execute(
+                "SELECT id, status FROM approvals WHERE status = 'pending' "
+                "OR (status = 'approved' AND execution_status IN ('not_started', 'running'))"
+            ).fetchall()
+            for approval_id, status in rows:
+                if status == "pending":
+                    self.record_approval_decision(
+                        approval_id, "interrupted", "服务重启，审批已失效，请重新申请"
+                    )
+                else:
+                    self.record_approval_execution(
+                        approval_id, "interrupted", "服务重启，工具执行结果未知，请检查实际状态"
+                    )
+
+    def create_approval(
+        self,
+        approval_id: str,
+        call: ToolCall,
+        *,
+        session_id: str | None,
+        chat_id: str | None,
+        policy: str,
+    ) -> None:
+        """在通知和执行前保存完整审批快照。"""
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO approvals "
+                "(id, session_id, chat_id, tool_call_id, tool_name, arguments, "
+                "policy, requested_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    approval_id,
+                    session_id,
+                    chat_id,
+                    call.id,
+                    call.name,
+                    json.dumps(call.arguments, ensure_ascii=False),
+                    policy,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            self._append_approval_event(approval_id, "requested", chat_id=chat_id)
+
+    def record_approval_decision(
+        self, approval_id: str, status: str, reason: str = "", *, user_id: str | None = None
+    ) -> None:
+        """原子保存审批结论和审批人，并追加审计事件。"""
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE approvals SET status = ?, reason = ?, decided_by = ?, decided_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (status, reason, user_id, datetime.now(UTC).isoformat(), approval_id),
+            )
+            if cursor.rowcount:
+                self._append_approval_event(approval_id, status, user_id=user_id, detail=reason)
+
+    def record_approval_execution(self, approval_id: str, status: str, error: str = "") -> None:
+        """记录批准后的工具执行开始、完成、失败或中断。"""
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE approvals SET execution_status = ?, execution_error = ? WHERE id = ?",
+                (status, error, approval_id),
+            )
+            if cursor.rowcount:
+                self._append_approval_event(approval_id, f"execution_{status}", detail=error)
+
+    def record_approval_notification(self, approval_id: str) -> None:
+        """记录完整参数和批准指令均已成功发送。"""
+        with self._connection:
+            if self._connection.execute(
+                "SELECT 1 FROM approvals WHERE id = ? AND status = 'pending'", (approval_id,)
+            ).fetchone():
+                self._append_approval_event(approval_id, "notified")
+
+    def record_approval_attempt(
+        self, approval_id: str, *, chat_id: str, user_id: str, detail: str
+    ) -> None:
+        """保存非法、过期或重复审批尝试；未知审批 ID 不创建记录。"""
+        with self._connection:
+            if self._connection.execute(
+                "SELECT 1 FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone():
+                self._append_approval_event(
+                    approval_id, "invalid_reply", chat_id=chat_id, user_id=user_id, detail=detail
+                )
+
+    def _append_approval_event(
+        self,
+        approval_id: str,
+        event: str,
+        *,
+        user_id: str | None = None,
+        chat_id: str | None = None,
+        detail: str = "",
+    ) -> None:
+        """在调用方事务中追加一条审计事件。"""
+        self._connection.execute(
+            "INSERT INTO approval_events "
+            "(approval_id, occurred_at, event, user_id, chat_id, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (approval_id, datetime.now(UTC).isoformat(), event, user_id, chat_id, detail),
+        )
+
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        """查询审批快照、执行结果及按时间排列的审计事件。"""
+        cursor = self._connection.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        result = dict(zip((column[0] for column in cursor.description), row, strict=True))
+        result["arguments"] = json.loads(result["arguments"])
+        events = self._connection.execute(
+            "SELECT occurred_at, event, user_id, chat_id, detail FROM approval_events "
+            "WHERE approval_id = ? ORDER BY id",
+            (approval_id,),
+        )
+        result["events"] = [
+            dict(zip((column[0] for column in events.description), event, strict=True))
+            for event in events
+        ]
+        return result
+
+    def list_approvals(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """按申请时间倒序查询最近审批，附带完整审计事件。"""
+        if not 1 <= limit <= 1_000:
+            raise ValueError("approval query limit must be between 1 and 1000")
+        rows = self._connection.execute(
+            "SELECT id FROM approvals ORDER BY requested_at DESC, rowid DESC LIMIT ?", (limit,)
+        ).fetchall()
+        records = [self.get_approval(row[0]) for row in rows]
+        return [record for record in records if record is not None]
 
     def get_or_create(self, session_id: str, workdir: Path) -> SessionSnapshot:
         """读取或创建会话，并将中断后未返回的工具调用标记为失败。"""

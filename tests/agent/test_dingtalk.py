@@ -48,7 +48,7 @@ def test_dingtalk_sender_filter_dedupe_and_approval(tmp_path: Path) -> None:
         await asyncio.gather(*adapter.tasks)
         assert agent.calls == [("task", "dingtalk:chat-1")]
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        adapter.approval.pending["approval-1"] = PendingApproval("chat-1", future)
+        adapter.approval.pending["approval-1"] = PendingApproval("chat-1", future, ready=True)
         await adapter._on_message(message("admin", "3", "approve approval-1"))
         assert future.result() is True
         await adapter.stop()

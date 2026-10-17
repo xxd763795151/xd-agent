@@ -56,7 +56,7 @@ def test_feishu_approver_may_be_distinct_from_task_sender(tmp_path: Path) -> Non
         )
         adapter = FeishuAdapter(FakeAgent(), store, settings, AgentSettings())
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        adapter.approval.pending["approval-1"] = PendingApproval("chat", future)
+        adapter.approval.pending["approval-1"] = PendingApproval("chat", future, ready=True)
         message = SimpleNamespace(
             chat_id="chat",
             sender_id="admin",

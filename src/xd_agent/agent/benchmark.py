@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from xd_agent.agent.approval import LocalApproval
 from xd_agent.agent.reporting import NullReporter
 from xd_agent.agent.service import AgentService
 
@@ -70,6 +71,7 @@ async def run_benchmark(service: AgentService, cases: list[BenchmarkCase]) -> li
                     session_id=f"bench:{case.id}:{uuid4().hex}",
                     workdir=root,
                     reporter=NullReporter(),
+                    approval=LocalApproval(),
                 )
                 for name, expected in case.expected_contains.items():
                     path = (root / name).resolve()

@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from xd_agent.agent.approval import SENSITIVE_TOOLS, ApprovalGate
 from xd_agent.agent.context import build_system_prompt, compose_context
-from xd_agent.agent.models import Message, ToolCall, ToolResult, Usage
+from xd_agent.agent.models import Message, Usage
 from xd_agent.agent.provider import ModelProvider
 from xd_agent.agent.reporting import AgentEvent, Reporter
 from xd_agent.agent.sessions import SessionStore
@@ -46,9 +45,7 @@ class AgentEngine:
         workdir: Path,
         prompt: str,
         reporter: Reporter,
-        approval: ApprovalGate,
         *,
-        chat_id: str | None = None,
         plan_mode: bool = False,
     ) -> str:
         """恢复会话并执行模型循环，返回没有工具调用时的最终回复。"""
@@ -97,7 +94,7 @@ class AgentEngine:
                     return message.content
                 for call in message.tool_calls:
                     await reporter.emit(AgentEvent("tool_start", "", tool_name=call.name))
-                    result = await self._run_tool(call, reporter, approval, chat_id=chat_id)
+                    result = await self.registry.execute(call)
                     turn_trace["tools"].append({"name": call.name, "error": result.is_error})
                     self.store.append(session_id, result.as_message())
                     history.append(result.as_message())
@@ -135,21 +132,6 @@ class AgentEngine:
         finally:
             trace["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
             self._save_trace(workdir, trace)
-
-    async def _run_tool(
-        self,
-        call: ToolCall,
-        reporter: Reporter,
-        approval: ApprovalGate,
-        *,
-        chat_id: str | None,
-    ) -> ToolResult:
-        """对敏感工具先执行审批，再将调用交给工具注册表。"""
-        if call.name in SENSITIVE_TOOLS:
-            allowed, reason = await approval.authorize(call, chat_id=chat_id, reporter=reporter)
-            if not allowed:
-                return ToolResult(call.id, call.name, reason, True)
-        return await self.registry.execute(call)
 
     def _cost(self, usage: Usage) -> float:
         """按输入、输出 token 单价估算本轮成本。"""

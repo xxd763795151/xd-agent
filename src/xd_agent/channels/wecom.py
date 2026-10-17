@@ -14,8 +14,7 @@ from xml.etree import ElementTree
 import httpx
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from xd_agent.agent.approval import ChatApproval
-from xd_agent.agent.models import ToolCall
+from xd_agent.agent.approval import ApprovalDecision, ApprovalRequest, ChatApproval
 from xd_agent.agent.reporting import AgentEvent, Reporter
 from xd_agent.agent.service import AgentService
 from xd_agent.agent.sessions import SessionStore
@@ -112,15 +111,18 @@ class WeComApproval(ChatApproval):
         super().__init__(
             set(adapter.settings.allowed_approver_ids),
             adapter.settings.approval_timeout_seconds,
+            store=adapter.sessions,
         )
         self.adapter = adapter
 
-    async def authorize(
-        self, call: ToolCall, *, chat_id: str | None, reporter: Reporter
-    ) -> tuple[bool, str]:
+    async def authorize(self, request: ApprovalRequest, *, reporter: Reporter) -> ApprovalDecision:
         """包装通知接收者后沿用聊天审批流程。"""
-        wrapped = ApprovalReporter(self.adapter, chat_id, reporter) if chat_id else reporter
-        return await super().authorize(call, chat_id=chat_id, reporter=wrapped)
+        wrapped = (
+            ApprovalReporter(self.adapter, request.chat_id, reporter)
+            if request.chat_id
+            else reporter
+        )
+        return await super().authorize(request, reporter=wrapped)
 
 
 class WeComAdapter:
@@ -229,13 +231,12 @@ class WeComAdapter:
         tokens = content.split()
         if len(tokens) == 2 and tokens[0].lower() in {"approve", "reject"}:
             pending = self.approval.pending.get(tokens[1])
-            if pending is not None:
-                self.approval.resolve(
-                    tokens[1],
-                    chat_id=pending.chat_id,
-                    user_id=sender_id,
-                    allowed=tokens[0].lower() == "approve",
-                )
+            self.approval.resolve(
+                tokens[1],
+                chat_id=pending.chat_id if pending is not None else sender_id,
+                user_id=sender_id,
+                allowed=tokens[0].lower() == "approve",
+            )
             return
         allowed_senders = self.settings.allowed_sender_ids or self.settings.allowed_approver_ids
         if sender_id not in allowed_senders:

@@ -11,7 +11,7 @@ import httpx
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from pydantic import SecretStr
 
-from xd_agent.agent.approval import PendingApproval
+from xd_agent.agent.approval import ApprovalRequest, PendingApproval
 from xd_agent.agent.models import ToolCall
 from xd_agent.agent.sessions import SessionStore
 from xd_agent.channels.wecom import WeComAdapter, WeComReporter
@@ -99,14 +99,15 @@ def test_wecom_verification_ingress_dedupe_and_approval(tmp_path: Path) -> None:
         assert agent.calls == [("task", "wecom:requester")]
 
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        adapter.approval.pending["approval-1"] = PendingApproval("requester", future)
+        adapter.approval.pending["approval-1"] = PendingApproval("requester", future, ready=True)
         assert await post("admin", "3", "approve approval-1") == (200, b"success")
         assert future.result() is True
 
         encrypted, params = encrypt(message("requester", "4", "task"))
         assert (
             await adapter.handle_webhook(
-                {}, f"<xml><Encrypt>{encrypted}</Encrypt></xml>".encode(),
+                {},
+                f"<xml><Encrypt>{encrypted}</Encrypt></xml>".encode(),
                 {**params, "msg_signature": "bad"},
             )
         )[0] == 403
@@ -165,8 +166,9 @@ def test_wecom_approval_notifies_distinct_approver(tmp_path: Path) -> None:
         adapter.send_text = send  # type: ignore[method-assign]
         task = asyncio.create_task(
             adapter.approval.authorize(
-                ToolCall("call", "write_file", {"path": "note.txt"}),
-                chat_id="requester",
+                ApprovalRequest(
+                    "approval-1", ToolCall("call", "write_file", {"path": "note.txt"}), "requester"
+                ),
                 reporter=WeComReporter(adapter, "requester"),
             )
         )
@@ -181,7 +183,7 @@ def test_wecom_approval_notifies_distinct_approver(tmp_path: Path) -> None:
             "<AgentID>1000001</AgentID></xml>"
         )
         await adapter._on_message(message)
-        assert await task == (True, "")
+        assert (await task).allowed
         await adapter.stop()
         store.close()
 

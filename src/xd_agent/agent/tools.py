@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import stat
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
+from xd_agent.agent.approval import ApprovalDecision, ApprovalGate, ApprovalRequest
 from xd_agent.agent.models import ToolCall, ToolResult
+from xd_agent.agent.reporting import NullReporter, Reporter
+from xd_agent.agent.sessions import SessionStore
 from xd_agent.core.config import AgentSettings
 
 
 class AgentTool(Protocol):
-    """工具接口；name、description 和 parameters 用于向模型声明调用方式。"""
+    """工具接口；只有无副作用的工具才能额外声明 read_only = True 以免审。"""
 
     name: str
     description: str
@@ -45,6 +50,7 @@ class ReadFile:
     """读取工作区内的 UTF-8 文本文件。"""
 
     name = "read_file"
+    read_only = True
     description = "读取工作区内一个文本文件的内容。"
     parameters = {
         "type": "object",
@@ -162,6 +168,7 @@ class ListFiles:
     """递归列出工作区文件，跳过内部目录并限制结果数量。"""
 
     name = "list_files"
+    read_only = True
     description = "列出工作区内的文件，可指定相对目录。"
     parameters = {
         "type": "object",
@@ -194,6 +201,7 @@ class SearchText:
     """在工作区内搜索文本并返回匹配位置。"""
 
     name = "search_text"
+    read_only = True
     description = "在工作区文本文件中搜索字符串，返回文件名、行号和匹配行。"
     parameters = {
         "type": "object",
@@ -305,10 +313,24 @@ class RunCommand:
 
 
 class ToolRegistry:
-    """按工具名注册工具，提供模型定义并统一处理调用错误。"""
+    """统一校验、审批和审计工具调用；只有显式声明只读的工具可免审。"""
 
-    def __init__(self, tools: list[AgentTool]) -> None:
+    def __init__(
+        self,
+        tools: list[AgentTool],
+        *,
+        approval: ApprovalGate | None = None,
+        reporter: Reporter | None = None,
+        chat_id: str | None = None,
+        store: SessionStore | None = None,
+        session_id: str | None = None,
+    ) -> None:
         self._tools = {tool.name: tool for tool in tools}
+        self.approval = approval
+        self.reporter = reporter if reporter is not None else NullReporter()
+        self.chat_id = chat_id
+        self.store = store
+        self.session_id = session_id
 
     def definitions(self) -> list[dict[str, Any]]:
         """生成发送给模型的工具名称、说明和参数模式。"""
@@ -318,10 +340,12 @@ class ToolRegistry:
         ]
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        """校验工具名与必需参数，执行工具并包装成功或失败结果。"""
+        """在实际执行入口审批，缺少策略时拒绝有副作用或未分类的工具。"""
         tool = self._tools.get(call.name)
         if tool is None:
             return ToolResult(call.id, call.name, f"未知工具：{call.name}", True)
+        approval_id: str | None = None
+        executing = False
         try:
             if not isinstance(call.arguments, dict):
                 raise ValueError("tool arguments must be an object")
@@ -329,7 +353,58 @@ class ToolRegistry:
             missing = [key for key in required if key not in call.arguments]
             if missing:
                 raise ValueError("missing required arguments: " + ", ".join(missing))
+            call = ToolCall(call.id, call.name, copy.deepcopy(call.arguments))
+            if getattr(tool, "read_only", False) is not True:
+                approval_id = uuid4().hex[:12]
+                if self.store is not None:
+                    self.store.create_approval(
+                        approval_id,
+                        call,
+                        session_id=self.session_id,
+                        chat_id=self.chat_id,
+                        policy=(
+                            type(self.approval).__name__ if self.approval is not None else "none"
+                        ),
+                    )
+                if self.approval is None:
+                    decision = ApprovalDecision(False, "rejected", "未配置审批策略，工具未执行")
+                else:
+                    decision = await self.approval.authorize(
+                        ApprovalRequest(approval_id, copy.deepcopy(call), self.chat_id),
+                        reporter=self.reporter,
+                    )
+                if self.store is not None:
+                    self.store.record_approval_decision(
+                        approval_id, decision.status, decision.reason, user_id=decision.user_id
+                    )
+                if not decision.allowed:
+                    return ToolResult(call.id, call.name, decision.reason, True)
+                if self.store is not None:
+                    self.store.record_approval_execution(approval_id, "running")
+                executing = True
             output = await tool.execute(call.arguments)
+            if approval_id is not None and self.store is not None:
+                self.store.record_approval_execution(approval_id, "succeeded")
             return ToolResult(call.id, call.name, output, False)
-        except (OSError, UnicodeError, ValueError, RuntimeError, KeyError) as exc:
+        except asyncio.CancelledError:
+            if approval_id is not None and self.store is not None:
+                if executing:
+                    self.store.record_approval_execution(
+                        approval_id, "cancelled", "等待工具结果被取消，实际副作用未知，请检查状态"
+                    )
+                else:
+                    self.store.record_approval_decision(approval_id, "cancelled", "审批等待被取消")
+                    record = self.store.get_approval(approval_id)
+                    if record is not None and record["status"] == "approved":
+                        self.store.record_approval_execution(
+                            approval_id, "cancelled", "已批准，但在工具开始执行前取消"
+                        )
+            raise
+        except Exception as exc:
+            if approval_id is not None and self.store is not None:
+                error = f"{type(exc).__name__}: {exc}"
+                if executing:
+                    self.store.record_approval_execution(approval_id, "failed", error)
+                else:
+                    self.store.record_approval_decision(approval_id, "error", error)
             return ToolResult(call.id, call.name, f"{type(exc).__name__}: {exc}", True)

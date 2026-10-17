@@ -56,7 +56,7 @@ class FeishuAdapter:
         self.settings = settings
         self.agent_settings = agent_settings
         self.approval = ChatApproval(
-            set(settings.allowed_approver_ids), settings.approval_timeout_seconds
+            set(settings.allowed_approver_ids), settings.approval_timeout_seconds, store=sessions
         )
         self.channel: Any = None
         self.tasks: set[asyncio.Task[None]] = set()

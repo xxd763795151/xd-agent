@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from xd_agent.agent.provider import HttpModelProvider
+from xd_agent.agent.sessions import SessionStore
 from xd_agent.cli.app import app
 from xd_agent.core.config import load_settings
 
@@ -24,8 +25,19 @@ def isolate_logging():
         root.setLevel(level)
 
 
-def test_cli_run_executes_agent_with_configured_workspace(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize("command", ["run", "chat"])
+@pytest.mark.parametrize(
+    ("answer", "auto_approve", "written", "status"),
+    [
+        ("y\n", False, True, "approved"),
+        ("n\n", False, False, "rejected"),
+        ("\n", False, False, "rejected"),
+        ("", False, False, "cancelled"),
+        ("", True, True, "approved"),
+    ],
+)
+def test_cli_run_and_chat_require_approval_and_record_selected_policy(
+    tmp_path: Path, monkeypatch, command, answer, auto_approve, written, status
 ) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("APP_AGENT__API_KEY", "test-key")
@@ -62,10 +74,32 @@ def test_cli_run_executes_agent_with_configured_workspace(
         return next(responses)
 
     monkeypatch.setattr(HttpModelProvider, "_post", fake_post)
-    result = CliRunner().invoke(app, ["run", "创建 hello.txt", "--session", "cli-test"])
+    args = [command, "--session", "cli-test"]
+    if command == "run":
+        args.append("创建 hello.txt")
+        input_text = answer
+    else:
+        input_text = "创建 hello.txt\n" + answer
+        if answer or auto_approve:
+            input_text += "/exit\n"
+    if auto_approve:
+        args.append("--auto-approve")
+    result = CliRunner().invoke(app, args, input=input_text)
     assert result.exit_code == 0, result.output
     assert "任务完成" in result.output
-    assert (tmp_path / "workspace" / "hello.txt").read_text(encoding="utf-8") == "hello"
+    path = tmp_path / "workspace" / "hello.txt"
+    assert path.exists() is written
+    if written:
+        assert path.read_text(encoding="utf-8") == "hello"
+    assert ("允许执行以上工具调用吗" in result.output) is (not auto_approve)
+    store = SessionStore(tmp_path / "sessions.sqlite3")
+    try:
+        record = store.list_approvals()[0]
+        assert record["status"] == status
+        assert record["policy"] == ("LocalApproval" if auto_approve else "TerminalApproval")
+        assert record["execution_status"] == ("succeeded" if written else "not_started")
+    finally:
+        store.close()
     load_settings.cache_clear()
 
 

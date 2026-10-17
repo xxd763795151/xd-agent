@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from xd_agent.agent.approval import ApprovalGate, LocalApproval
+from xd_agent.agent.approval import ApprovalGate
 from xd_agent.agent.engine import AgentEngine
 from xd_agent.agent.explorer import ExploreWorkspace
 from xd_agent.agent.provider import ModelProvider
@@ -49,6 +49,8 @@ class AgentService:
         plan_mode: bool = False,
     ) -> str:
         """校验任务与工作区，创建工具和引擎后执行指定会话。"""
+        if approval is None:
+            raise ValueError("approval policy is required; select an explicit approval strategy")
         if self.provider is None:
             raise ValueError("APP_AGENT__API_KEY is required to run the agent")
         if not prompt.strip():
@@ -74,7 +76,12 @@ class AgentService:
                         ExploreWorkspace(
                             self.provider, read_only, self.settings, self.store, session_id
                         ),
-                    ]
+                    ],
+                    approval=approval,
+                    reporter=reporter,
+                    chat_id=chat_id,
+                    store=self.store,
+                    session_id=session_id,
                 )
                 engine = AgentEngine(self.provider, self.store, registry, self.settings)
                 return await engine.run(
@@ -82,8 +89,6 @@ class AgentService:
                     root,
                     prompt,
                     reporter,
-                    approval or LocalApproval(),
-                    chat_id=chat_id,
                     plan_mode=plan_mode,
                 )
             finally:

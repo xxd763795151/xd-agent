@@ -14,6 +14,7 @@ class ExploreWorkspace:
     """供主 Agent 调用的只读探索工具，最多进行十轮模型交互。"""
 
     name = "explore_workspace"
+    read_only = True
     description = "让只读探索助手检查较多文件，并返回简短调查结果。"
     parameters = {
         "type": "object",

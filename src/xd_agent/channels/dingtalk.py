@@ -71,7 +71,7 @@ class DingTalkAdapter:
         self.settings = settings
         self.agent_settings = agent_settings
         self.approval = ChatApproval(
-            set(settings.allowed_approver_ids), settings.approval_timeout_seconds
+            set(settings.allowed_approver_ids), settings.approval_timeout_seconds, store=sessions
         )
         self.http_client = httpx.AsyncClient(timeout=15)
         self.client: Any = None

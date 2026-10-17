@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from xd_agent.agent.approval import LocalApproval
 from xd_agent.agent.models import ToolCall
 from xd_agent.agent.tools import (
     EditFile,
@@ -21,7 +22,9 @@ def test_file_tools_reject_escape_and_edit_only_unique_match(tmp_path: Path) -> 
         files.resolve("../outside.txt")
 
     async def scenario() -> None:
-        registry = ToolRegistry([ReadFile(files), WriteFile(files), EditFile(files)])
+        registry = ToolRegistry(
+            [ReadFile(files), WriteFile(files), EditFile(files)], approval=LocalApproval()
+        )
         written = await registry.execute(
             ToolCall("1", "write_file", {"path": "a.txt", "content": "one\r\ntwo\r\n"})
         )
@@ -60,7 +63,7 @@ def test_read_tool_rejects_symlink_outside_workspace(tmp_path: Path) -> None:
 def test_command_nonzero_exit_is_tool_error(tmp_path: Path) -> None:
     async def scenario() -> None:
         files = WorkspaceFiles(tmp_path, 1000)
-        registry = ToolRegistry([RunCommand(files, AgentSettings())])
+        registry = ToolRegistry([RunCommand(files, AgentSettings())], approval=LocalApproval())
         result = await registry.execute(ToolCall("exit", "run_command", {"command": "exit 7"}))
         assert result.is_error
         assert "status 7" in result.output

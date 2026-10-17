@@ -1,6 +1,9 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
+from xd_agent.agent.approval import ApprovalDecision, LocalApproval
 from xd_agent.agent.models import Message, ModelReply, ToolCall, Usage
 from xd_agent.agent.reporting import AgentEvent
 from xd_agent.agent.service import AgentService
@@ -47,7 +50,11 @@ def test_agent_runs_tool_and_persists_session(tmp_path: Path) -> None:
         service = AgentService(provider, store, settings)
         workdir = tmp_path / "work"
         result = await service.run(
-            "写一份便签", session_id="cli:test", workdir=workdir, reporter=reporter
+            "写一份便签",
+            session_id="cli:test",
+            workdir=workdir,
+            reporter=reporter,
+            approval=LocalApproval(),
         )
         assert result == "已完成。"
         assert (workdir / "note.txt").read_text(encoding="utf-8") == "hello"
@@ -68,6 +75,57 @@ def test_agent_runs_tool_and_persists_session(tmp_path: Path) -> None:
         reopened = SessionStore(tmp_path / "sessions.sqlite3")
         assert len(reopened.get_or_create("cli:test", workdir).messages) == 4
         reopened.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("chat_id", [None, "chat"])
+def test_service_requires_explicit_policy_before_creating_workspace(
+    tmp_path: Path, chat_id
+) -> None:
+    async def scenario():
+        store = SessionStore(tmp_path / "sessions.sqlite3")
+        try:
+            provider = FakeProvider()
+            workdir = tmp_path / "work"
+            with pytest.raises(ValueError, match="approval policy is required"):
+                await AgentService(provider, store, AgentSettings()).run(
+                    "write",
+                    session_id="test",
+                    chat_id=chat_id,
+                    workdir=workdir,
+                    reporter=CaptureReporter(),
+                )
+            assert provider.calls == 0
+            assert not workdir.exists()
+        finally:
+            store.close()
+
+    asyncio.run(scenario())
+
+
+def test_falsey_explicit_policy_is_not_replaced_with_local_approval(tmp_path: Path) -> None:
+    class DenyPolicy:
+        def __bool__(self):
+            return False
+
+        async def authorize(self, request, *, reporter):
+            return ApprovalDecision(False, "rejected", "denied")
+
+    async def scenario():
+        store = SessionStore(tmp_path / "sessions.sqlite3")
+        try:
+            await AgentService(FakeProvider(), store, AgentSettings()).run(
+                "write",
+                session_id="chat",
+                workdir=tmp_path / "work",
+                reporter=CaptureReporter(),
+                approval=DenyPolicy(),
+            )
+            assert not (tmp_path / "work" / "note.txt").exists()
+            assert store.list_approvals()[0]["status"] == "rejected"
+        finally:
+            store.close()
 
     asyncio.run(scenario())
 
