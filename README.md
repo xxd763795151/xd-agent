@@ -109,6 +109,8 @@ uv run --frozen --extra wecom uvicorn xd_agent.web.app:create_app --factory --ho
 
 ## 工具与评测
 
+工作区级技能放在 `.agents/skills/<skill-name>/SKILL.md`，例如 `.agents/skills/document-summary/SKILL.md`；技能目录可按需包含 `scripts/`、`references/` 和 `assets/`。这里的工作区由 `--dir` 或 `agent.workspace_dir` 指定。当前启动任务时会将技能文件内容加入系统提示词，仅加载工作区级技能，尚不扫描用户级目录。旧的 `.claw/skills/` 不再扫描，已有技能需迁移到 `.agents/skills/`。技能文件可纳入版本控制，运行数据仍保存在 `.xd-agent/`。
+
 提供 `read_file`、`read_tool_output`、`list_files`、`search_text`、`write_file`、`edit_file`、`run_command` 和只读的 `explore_workspace`。文件工具将路径限制在工作区中；`run_command` 会在宿主机执行 PowerShell（Windows）或 Bash（Linux/macOS），CLI 使用者应只向可信任务开放。命令失败、超时、重复工具失败以及最大轮数均会明确反馈。
 
 工具成功、失败和审批拒绝的结果统一受 `max_tool_output_chars`（默认 8000 字符）限制，实际每页预算还不超过 `max_context_chars` 的四分之一。长结果保存在工作区 `.xd-agent/tool-outputs/`，返回预览和存档 ID；模型可用 `read_tool_output(output_id, offset, limit)` 按需取回。命令输出流式存档，避免完整日志占用内存；`read_file(path, offset, limit)` 可直接分页读取原文件。`offset` 按 Unicode 字符计数，续读提示也计入页面长度，按提示继续不会跳过正文。小于续读提示长度的页面会返回参数错误。
