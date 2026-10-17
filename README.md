@@ -139,3 +139,7 @@ uv run --no-sync mypy src
 ```
 
 现有 `/health/live` 和 `/health/ready` 可用于服务健康检查。脚手架原有的 `greet` 与 `/greetings` 示例仍保留，便于验证 CLI 与 Web 的基本运行环境。
+
+## 开源协议
+
+本项目采用 [MIT License](LICENSE) 开源协议。
