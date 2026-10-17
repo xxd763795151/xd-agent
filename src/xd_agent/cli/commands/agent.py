@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import typer
 
+from xd_agent.agent.provider import ProviderError
 from xd_agent.agent.reporting import TerminalReporter
 from xd_agent.cli.context import run_with_runtime
 from xd_agent.cli.errors import ExitCode
@@ -21,6 +22,7 @@ def run(
     directory: Annotated[Path | None, typer.Option("--dir", help="工作区目录")] = None,
     session: Annotated[str | None, typer.Option("--session", help="可复用的会话 ID")] = None,
     plan: Annotated[bool, typer.Option("--plan", help="维护 PLAN.md 和 TODO.md")] = False,
+    debug: Annotated[bool, typer.Option("--debug", help="模型服务错误时打印异常堆栈")] = False,
 ) -> None:
     """执行一次 Agent 任务，可指定工作区、会话及计划模式。"""
 
@@ -42,6 +44,9 @@ def run(
 
     try:
         run_with_runtime(action)
+    except ProviderError as exc:
+        logger.error("agent_error: %s", exc, exc_info=debug)
+        raise typer.Exit(ExitCode.UNAVAILABLE) from exc
     except ValueError as exc:
         typer.echo(f"invalid_request: {exc}", err=True)
         raise typer.Exit(ExitCode.INVALID_USAGE) from exc
@@ -56,6 +61,7 @@ def run(
 def chat(
     directory: Annotated[Path | None, typer.Option("--dir", help="工作区目录")] = None,
     session: Annotated[str | None, typer.Option("--session", help="可复用的会话 ID")] = None,
+    debug: Annotated[bool, typer.Option("--debug", help="模型服务错误时打印异常堆栈")] = False,
 ) -> None:
     """在固定会话中循环接收终端输入，直到用户退出。"""
 
@@ -80,6 +86,9 @@ def chat(
 
     try:
         run_with_runtime(action)
+    except ProviderError as exc:
+        logger.error("agent_error: %s", exc, exc_info=debug)
+        raise typer.Exit(ExitCode.UNAVAILABLE) from exc
     except ValueError as exc:
         typer.echo(f"invalid_request: {exc}", err=True)
         raise typer.Exit(ExitCode.INVALID_USAGE) from exc

@@ -2,10 +2,11 @@ import asyncio
 import json
 
 import httpx
+import pytest
 from pydantic import SecretStr
 
 from xd_agent.agent.models import Message, ToolCall
-from xd_agent.agent.provider import HttpModelProvider
+from xd_agent.agent.provider import HttpModelProvider, ProviderError
 from xd_agent.core.config import AgentSettings
 
 
@@ -56,6 +57,100 @@ def test_openai_provider_round_trips_tool_messages() -> None:
             )
             assert reply.message.tool_calls[0].arguments == {"path": "a.txt"}
             assert reply.usage.input_tokens == 8
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "hint"),
+    [
+        (400, "请求参数无效"),
+        (401, "身份认证失败"),
+        (403, "访问被拒绝"),
+        (404, "接口或模型不存在"),
+        (429, "请求受到限制"),
+        (503, "模型服务暂时不可用"),
+        (418, "请检查模型服务配置"),
+    ],
+)
+def test_provider_http_errors_keep_status_and_code_without_response_body(status, hint) -> None:
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                status, json={"error": {"code": "1302", "message": "private response body"}}
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = HttpModelProvider(AgentSettings(api_key=SecretStr("test-key")), client)
+            with pytest.raises(ProviderError) as caught:
+                await provider.generate([Message(role="user", content="private prompt")], [])
+        assert caught.value.status_code == status
+        assert caught.value.error_code == "1302"
+        assert f"HTTP {status}, code=1302" in str(caught.value)
+        assert hint in str(caught.value)
+        assert "private" not in str(caught.value)
+        assert "test-key" not in str(caught.value)
+        assert isinstance(caught.value.__cause__, httpx.HTTPStatusError)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"gateway failure",
+        b"[]",
+        b'{"error":"limited"}',
+        b'{"error":{"code":null}}',
+        b'{"error":{"code":true}}',
+        b'{"error":{"code":"unsafe\\ncode"}}',
+    ],
+)
+def test_provider_http_error_handles_missing_or_invalid_error_code(body) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(429, content=body))
+        ) as client:
+            provider = HttpModelProvider(AgentSettings(api_key=SecretStr("test")), client)
+            with pytest.raises(ProviderError) as caught:
+                await provider.generate([], [])
+        assert caught.value.status_code == 429
+        assert caught.value.error_code is None
+        assert "HTTP 429" in str(caught.value)
+        assert "code=" not in str(caught.value)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("error_type", "hint"),
+    [(httpx.ReadTimeout, "模型请求超时"), (httpx.ConnectError, "无法连接模型服务")],
+)
+def test_provider_distinguishes_timeout_and_connection_errors(error_type, hint) -> None:
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise error_type("private network details", request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = HttpModelProvider(AgentSettings(api_key=SecretStr("test")), client)
+            with pytest.raises(ProviderError) as caught:
+                await provider.generate([], [])
+        assert hint in str(caught.value)
+        assert "private" not in str(caught.value)
+        assert caught.value.status_code is None
+        assert isinstance(caught.value.__cause__, error_type)
+
+    asyncio.run(scenario())
+
+
+def test_provider_reports_invalid_success_json() -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, text="invalid"))
+        ) as client:
+            provider = HttpModelProvider(AgentSettings(api_key=SecretStr("test")), client)
+            with pytest.raises(ProviderError, match="无效 JSON"):
+                await provider.generate([], [])
 
     asyncio.run(scenario())
 

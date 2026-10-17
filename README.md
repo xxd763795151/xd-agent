@@ -15,6 +15,8 @@ Linux/macOS 请用对应 shell 的环境变量语法。默认模型为智谱的 
 
 `run` 默认创建新会话；使用 `--session NAME` 可以继续已有会话。`--dir PATH` 指定工作区，`--plan` 让 Agent 维护 `PLAN.md` 与 `TODO.md`。`chat` 是多轮终端会话，输入 `/exit` 结束。会话存入 `.xd-agent/sessions.sqlite3`，每次运行的简要追踪保存在工作区的 `.xd-agent/traces/`。
 
+模型服务返回 HTTP 错误、请求超时或网络异常时，`run` / `chat` 默认只记录一条包含处理建议的错误日志，并以退出码 `5` 结束；HTTP 错误会保留状态码和可用的服务端错误码。需要排查堆栈时使用 `xd-agent run "任务" --debug` 或 `xd-agent chat --debug`。HTTP 429 表示请求受到限制，需结合错误码检查服务商的并发、速率及配额限制；当前不会自动重试请求。
+
 ## 配置
 
 配置来自 `config/base.yaml` 与当前环境 YAML，并可通过 `APP_*` 环境变量覆盖。`APP_ENV` 可选 `development`、`test`、`staging` 或 `production`。预发布和生产环境需要用绝对路径设置 `APP_CONFIG_DIR`。本地开发可复制 `.env.example` 为 `.env`；不要将密钥写入 YAML 或提交到版本控制。
