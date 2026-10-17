@@ -1,0 +1,3 @@
+logging:
+  level: WARNING
+  json_output: false

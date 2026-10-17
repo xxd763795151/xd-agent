@@ -1,0 +1,44 @@
+service_name: xd-agent
+http:
+  host: 127.0.0.1
+  port: 8000
+logging:
+  level: INFO
+  json_output: true
+greeting:
+  prefix: Hello
+channel:
+  type: cli
+  feishu:
+    app_id: null
+    app_secret: null
+    verification_token: null
+    encrypt_key: null
+    allowed_approver_ids: []
+    allowed_sender_ids: []
+    approval_timeout_seconds: 300
+  dingtalk:
+    client_id: null
+    client_secret: null
+    allowed_approver_ids: []
+    allowed_sender_ids: []
+    approval_timeout_seconds: 300
+  wecom:
+    corp_id: null
+    corp_secret: null
+    agent_id: null
+    token: null
+    encoding_aes_key: null
+    allowed_approver_ids: []
+    allowed_sender_ids: []
+    approval_timeout_seconds: 300
+agent:
+  provider: openai_compatible
+  model: glm-4.5-air
+  workspace_dir: workspace
+  session_db: .xd-agent/sessions.sqlite3
+  max_turns: 30
+  max_context_chars: 120000
+  memory_messages: 40
+  command_timeout_seconds: 30
+  max_tool_output_chars: 8000

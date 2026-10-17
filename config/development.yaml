@@ -1,0 +1,3 @@
+logging:
+  level: DEBUG
+  json_output: false

@@ -1,0 +1,12 @@
+[
+  {
+    "id": "edit-version",
+    "prompt": "请读取 config.json，然后用 edit_file 将 version 从 v1.0.0 改为 v2.0.0。",
+    "files": {
+      "config.json": "{\"name\": \"sample\", \"version\": \"v1.0.0\"}\n"
+    },
+    "expected_contains": {
+      "config.json": "\"version\": \"v2.0.0\""
+    }
+  }
+]
