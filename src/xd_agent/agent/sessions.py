@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from xd_agent.agent.models import Message, ToolCall, ToolResult, Usage
 
@@ -52,6 +53,12 @@ class SessionStore:
                 channel TEXT NOT NULL,
                 event_id TEXT NOT NULL,
                 PRIMARY KEY (channel, event_id)
+            );
+            CREATE TABLE IF NOT EXISTS channel_sessions (
+                channel TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                PRIMARY KEY (channel, chat_id)
             );
             CREATE TABLE IF NOT EXISTS session_memory (
                 session_id TEXT PRIMARY KEY REFERENCES sessions(id),
@@ -227,6 +234,25 @@ class SessionStore:
         ).fetchall()
         records = [self.get_approval(row[0]) for row in rows]
         return [record for record in records if record is not None]
+
+    def get_channel_session(self, channel: str, chat_id: str) -> str:
+        """读取聊天当前的逻辑会话；未切换过时沿用旧会话 ID。"""
+        row = self._connection.execute(
+            "SELECT session_id FROM channel_sessions WHERE channel = ? AND chat_id = ?",
+            (channel, chat_id),
+        ).fetchone()
+        return str(row[0]) if row else f"{channel}:{chat_id}"
+
+    def new_channel_session(self, channel: str, chat_id: str) -> str:
+        """持久化新的逻辑会话 ID，保留旧会话、消息和历史摘要。"""
+        session_id = f"{channel}:{chat_id}:{uuid4().hex}"
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO channel_sessions (channel, chat_id, session_id) VALUES (?, ?, ?) "
+                "ON CONFLICT(channel, chat_id) DO UPDATE SET session_id = excluded.session_id",
+                (channel, chat_id, session_id),
+            )
+        return session_id
 
     def get_or_create(self, session_id: str, workdir: Path) -> SessionSnapshot:
         """读取或创建会话，并将中断后未返回的工具调用标记为失败。"""

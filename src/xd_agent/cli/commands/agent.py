@@ -8,8 +8,9 @@ from uuid import uuid4
 import typer
 
 from xd_agent.agent.approval import LocalApproval, TerminalApproval
+from xd_agent.agent.conversations import ConversationControl
 from xd_agent.agent.provider import ProviderError
-from xd_agent.agent.reporting import TerminalReporter
+from xd_agent.agent.reporting import AgentEvent, TerminalReporter
 from xd_agent.cli.context import run_with_runtime
 from xd_agent.cli.errors import ExitCode
 from xd_agent.core.config import resolve_project_path
@@ -38,9 +39,15 @@ def run(
             else resolve_project_path(runtime.settings.agent.workspace_dir)
         )
         reporter = TerminalReporter()
+        chat_id = session or uuid4().hex
+        conversations = ConversationControl(runtime.sessions, "cli")
+        notice = conversations.handle_command(prompt, chat_id)
+        if notice is not None:
+            await reporter.emit(AgentEvent("notice", notice))
+            return
         await runtime.agent.run(
             prompt,
-            session_id=f"cli:{session or uuid4().hex}",
+            session_id=conversations.session_id(chat_id),
             workdir=workdir,
             reporter=reporter,
             approval=LocalApproval() if auto_approve else TerminalApproval(runtime.sessions),
@@ -80,17 +87,25 @@ def chat(
             if directory
             else resolve_project_path(runtime.settings.agent.workspace_dir)
         )
-        session_id = f"cli:{session or uuid4().hex}"
+        chat_id = session or uuid4().hex
+        conversations = ConversationControl(runtime.sessions, "cli")
         reporter = TerminalReporter()
-        typer.echo(f"会话 {session_id}；输入 /exit 退出。", err=True)
+        typer.echo(
+            f"会话 {conversations.session_id(chat_id)}；输入 /new 开启新会话，/exit 退出。",
+            err=True,
+        )
         while True:
             prompt = typer.prompt("你", prompt_suffix="> ").strip()
             if prompt.lower() in {"/exit", "/quit"}:
                 return
+            notice = conversations.handle_command(prompt, chat_id)
+            if notice is not None:
+                await reporter.emit(AgentEvent("notice", notice))
+                continue
             if prompt:
                 await runtime.agent.run(
                     prompt,
-                    session_id=session_id,
+                    session_id=conversations.session_id(chat_id),
                     workdir=workdir,
                     reporter=reporter,
                     approval=(

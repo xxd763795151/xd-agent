@@ -15,6 +15,7 @@ import httpx
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from xd_agent.agent.approval import ApprovalDecision, ApprovalRequest, ChatApproval
+from xd_agent.agent.conversations import ConversationControl
 from xd_agent.agent.reporting import AgentEvent, Reporter
 from xd_agent.agent.service import AgentService
 from xd_agent.agent.sessions import SessionStore
@@ -145,7 +146,8 @@ class WeComAdapter:
         self.approval = WeComApproval(self)
         self.crypto: WeComCrypto | None = None
         self.http_client = httpx.AsyncClient(timeout=15)
-        self.tasks: set[asyncio.Task[None]] = set()
+        self.conversations = ConversationControl(sessions, "wecom", self.approval)
+        self.tasks = self.conversations.tasks
         self._access_token = ""
         self._token_expires = 0.0
         self._token_lock = asyncio.Lock()
@@ -242,9 +244,21 @@ class WeComAdapter:
         if sender_id not in allowed_senders:
             logger.warning("WeCom sender denied sender=%s", sender_id)
             return
+        notice = self.conversations.handle_command(content, sender_id)
+        if notice is not None:
+            self.conversations.track(
+                sender_id, asyncio.create_task(self._send_notice(sender_id, notice))
+            )
+            return
         task = asyncio.create_task(self._process(sender_id, content))
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        self.conversations.track(sender_id, task)
+
+    async def _send_notice(self, user_id: str, text: str) -> None:
+        """在后台发送会话命令结果，不调用模型或阻塞 Webhook 确认。"""
+        try:
+            await WeComReporter(self, user_id).emit(AgentEvent("notice", text))
+        except Exception:
+            logger.exception("failed to report WeCom command result user=%s", user_id)
 
     async def _get_access_token(self) -> str:
         """在锁内复用未过期令牌，必要时向企业微信接口刷新。"""
@@ -317,7 +331,7 @@ class WeComAdapter:
         try:
             await self.agent.run(
                 prompt,
-                session_id=f"wecom:{user_id}",
+                session_id=self.conversations.session_id(user_id),
                 workdir=resolve_project_path(self.agent_settings.workspace_dir),
                 reporter=reporter,
                 approval=self.approval,

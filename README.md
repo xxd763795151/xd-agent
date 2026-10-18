@@ -13,7 +13,7 @@ uv run --frozen xd-agent chat --session daily
 
 Linux/macOS 请用对应 shell 的环境变量语法。默认模型为智谱的 OpenAI 兼容接口 `glm-4.5-air`。可通过 `APP_AGENT__PROVIDER`、`APP_AGENT__MODEL` 和 `APP_AGENT__BASE_URL` 选择其他 OpenAI 兼容或 Anthropic 兼容服务。价格参数只用于估算成本，应按所选模型实际价格设置。
 
-`run` 默认创建新会话；使用 `--session NAME` 可以继续已有会话。`--dir PATH` 指定工作区，`--plan` 让 Agent 维护 `PLAN.md` 与 `TODO.md`。`chat` 是多轮终端会话，输入 `/exit` 结束。写文件、修改文件和需要人工审批的命令会展示完整参数并逐次确认，空输入默认拒绝；命令默认支持经分析后的只读免审。无人值守时可显式加 `--auto-approve` 自动批准全部操作。会话存入 `.xd-agent/sessions.sqlite3`，每次运行的简要追踪保存在工作区的 `.xd-agent/traces/`。
+`run` 默认创建新会话；使用 `--session NAME` 可以继续已有会话。`--dir PATH` 指定工作区，`--plan` 让 Agent 维护 `PLAN.md` 与 `TODO.md`。`chat` 是多轮终端会话，输入 `/new` 开启新会话，`/exit` 结束。写文件、修改文件和需要人工审批的命令会展示完整参数并逐次确认，空输入默认拒绝；命令默认支持经分析后的只读免审。无人值守时可显式加 `--auto-approve` 自动批准全部操作。会话存入 `.xd-agent/sessions.sqlite3`，每次运行的简要追踪保存在工作区的 `.xd-agent/traces/`。
 
 模型服务返回 HTTP 错误、请求超时或网络异常时，`run` / `chat` 默认只记录一条包含处理建议的错误日志，并以退出码 `5` 结束；HTTP 错误会保留状态码和可用的服务端错误码。需要排查堆栈时使用 `xd-agent run "任务" --debug` 或 `xd-agent chat --debug`。HTTP 429 表示请求受到限制，需结合错误码检查服务商的并发、速率及配额限制；当前不会自动重试请求。
 
@@ -39,6 +39,8 @@ agent:
 `channel.type` 支持 `cli`、`feishu`、`dingtalk` 和 `wecom`。各渠道属性均可写入 `config/base.yaml` 或对应环境的 YAML，环境文件按字段覆盖基础文件；也可用 `APP_CHANNEL__...` 环境变量覆盖。默认配置在 `config/base.yaml` 列出了全部渠道字段。选中渠道时才要求该渠道的必需凭据和审批人 ID。
 
 配置好渠道后，用 `xd-agent serve` 启动 HTTP 服务及所选消息渠道，按 Ctrl+C 停止。监听地址和端口默认读取 `http.host`、`http.port`（也支持 `APP_HTTP__HOST`、`APP_HTTP__PORT`），可用 `serve --host 0.0.0.0 --port 8000` 覆盖。全局选项放在子命令之前，例如 `xd-agent --env production --config-dir C:/xd-agent/config serve`。`serve` 固定使用单个工作进程；`channel.type=cli` 时只提供 HTTP 接口，终端对话仍使用 `chat`。
+
+CLI、飞书、钉钉和企业微信统一支持单独发送 `/new`：直接开启新上下文，不调用模型；旧聊天、摘要和工作区文件保留。当前会话映射保存在数据库中，服务重启后继续使用新会话。消息渠道仅允许有权发起任务的用户使用；当前窗口有任务排队、执行或等待审批时，会提示先完成任务。飞书和钉钉的群聊会切换整个群的机器人上下文，企业微信按成员单聊切换。CLI 在任务完成后可输入 `/new`；指定 `--session NAME` 时，后续 `chat` 和 `run` 均继续该名称对应的新会话，也可用 `xd-agent run /new --session NAME` 直接切换。
 
 命令审批共用以下流程，适用于 CLI、飞书、钉钉和企业微信：
 

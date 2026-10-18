@@ -28,6 +28,76 @@ def isolate_logging():
         root.setLevel(level)
 
 
+def test_cli_new_isolates_context_and_resumes_named_session(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("APP_AGENT__API_KEY", "test-key")
+    monkeypatch.setenv("APP_AGENT__WORKSPACE_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("APP_AGENT__SESSION_DB", str(tmp_path / "sessions.sqlite3"))
+    load_settings.cache_clear()
+    contexts = []
+
+    async def generate(self, messages, tools):
+        contexts.append(messages)
+        return ModelReply(Message("assistant", "done"))
+
+    monkeypatch.setattr(HttpModelProvider, "generate", generate)
+    runner = CliRunner()
+    try:
+        result = runner.invoke(
+            app,
+            ["chat", "--session", "daily"],
+            input="old-question\n/new task\n /NEW \nnew-question\n/exit\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "请单独发送 /new" in result.output
+        assert result.output.count("已开启新会话") == 1
+        assert len(contexts) == 2
+        assert [m.content for m in contexts[1] if m.role == "user"] == ["new-question"]
+        store = SessionStore(tmp_path / "sessions.sqlite3")
+        try:
+            session_id = store.get_channel_session("cli", "daily")
+            assert session_id != "cli:daily"
+            assert len(store.get_or_create("cli:daily", tmp_path / "work").messages) == 2
+            assert len(store.get_or_create(session_id, tmp_path / "work").messages) == 2
+        finally:
+            store.close()
+
+        result = runner.invoke(app, ["run", "--session", "daily", "followup"])
+        assert result.exit_code == 0, result.output
+        assert [m.content for m in contexts[2] if m.role == "user"] == ["new-question", "followup"]
+        result = runner.invoke(app, ["run", "--session", "daily", "/new"])
+        assert result.exit_code == 0, result.output
+        assert "已开启新会话" in result.output
+        assert len(contexts) == 3
+        result = runner.invoke(app, ["chat", "--session", "daily"], input="fresh\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert [m.content for m in contexts[3] if m.role == "user"] == ["fresh"]
+    finally:
+        load_settings.cache_clear()
+
+
+@pytest.mark.parametrize("command", ["run", "chat"])
+def test_cli_new_does_not_require_model_credentials(tmp_path: Path, monkeypatch, command) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("APP_AGENT__API_KEY", "")
+    monkeypatch.setenv("APP_AGENT__SESSION_DB", str(tmp_path / "sessions.sqlite3"))
+    load_settings.cache_clear()
+    args = [command, "--session", "without-key"]
+    if command == "run":
+        args.append("/new")
+    try:
+        result = CliRunner().invoke(app, args, input="/new\n/exit\n")
+        assert result.exit_code == 0, result.output
+        assert "已开启新会话" in result.output
+        store = SessionStore(tmp_path / "sessions.sqlite3")
+        try:
+            assert store.get_channel_session("cli", "without-key") != "cli:without-key"
+        finally:
+            store.close()
+    finally:
+        load_settings.cache_clear()
+
+
 @pytest.mark.parametrize("command", ["run", "chat"])
 @pytest.mark.parametrize(
     ("answer", "auto_approve", "written", "status"),

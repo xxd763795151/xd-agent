@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl, urlsplit
 import httpx
 
 from xd_agent.agent.approval import ChatApproval
+from xd_agent.agent.conversations import ConversationControl
 from xd_agent.agent.reporting import AgentEvent, Reporter
 from xd_agent.agent.service import AgentService
 from xd_agent.agent.sessions import SessionStore
@@ -114,7 +115,8 @@ class DingTalkAdapter:
         self.http_client = httpx.AsyncClient(timeout=15)
         self.client: Any = None
         self.stream_task: asyncio.Task[None] | None = None
-        self.tasks: set[asyncio.Task[None]] = set()
+        self.conversations = ConversationControl(sessions, "dingtalk", self.approval)
+        self.tasks = self.conversations.tasks
 
     async def start(self) -> None:
         """校验凭据并启动 Stream，最多等待 30 秒建立连接。"""
@@ -229,10 +231,28 @@ class DingTalkAdapter:
         if sender_id not in allowed_senders:
             logger.warning("DingTalk sender denied chat=%s sender=%s", chat_id, sender_id)
             return
+        notice = self.conversations.handle_command(content, chat_id)
+        if notice is not None:
+            self.conversations.track(
+                chat_id,
+                asyncio.create_task(
+                    self._send_notice(chat_id, str(message.session_webhook), notice)
+                ),
+            )
+            return
         logger.info("DingTalk task queued chat=%s message_id=%s", chat_id, message_id)
         task = asyncio.create_task(self._process(chat_id, content, str(message.session_webhook)))
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        self.conversations.track(chat_id, task)
+
+    async def _send_notice(self, chat_id: str, session_webhook: str, text: str) -> None:
+        """在后台发送会话命令结果，不调用模型或阻塞 Stream 确认。"""
+        try:
+            reporter = DingTalkReporter(self.http_client, session_webhook)
+            await reporter.emit(AgentEvent("notice", text))
+        except DingTalkSendError as exc:
+            logger.error("DingTalk reply delivery failed chat=%s: %s", chat_id, exc)
+        except Exception:
+            logger.exception("failed to report DingTalk command result chat=%s", chat_id)
 
     async def _process(self, chat_id: str, prompt: str, session_webhook: str) -> None:
         """使用当前消息的会话 Webhook 报告 Agent 进度和错误。"""
@@ -240,7 +260,7 @@ class DingTalkAdapter:
             reporter: Reporter = DingTalkReporter(self.http_client, session_webhook)
             await self.agent.run(
                 prompt,
-                session_id=f"dingtalk:{chat_id}",
+                session_id=self.conversations.session_id(chat_id),
                 workdir=resolve_project_path(self.agent_settings.workspace_dir),
                 reporter=reporter,
                 approval=self.approval,

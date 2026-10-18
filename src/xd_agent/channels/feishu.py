@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from xd_agent.agent.approval import ChatApproval
+from xd_agent.agent.conversations import ConversationControl
 from xd_agent.agent.reporting import AgentEvent, Reporter
 from xd_agent.agent.service import AgentService
 from xd_agent.agent.sessions import SessionStore
@@ -59,7 +60,8 @@ class FeishuAdapter:
             set(settings.allowed_approver_ids), settings.approval_timeout_seconds, store=sessions
         )
         self.channel: Any = None
-        self.tasks: set[asyncio.Task[None]] = set()
+        self.conversations = ConversationControl(sessions, "feishu", self.approval)
+        self.tasks = self.conversations.tasks
 
     async def start(self) -> None:
         """校验凭据，注册 SDK 回调并等待飞书渠道就绪。"""
@@ -143,9 +145,21 @@ class FeishuAdapter:
         if sender_id not in allowed_senders:
             logger.warning("Feishu sender denied chat=%s sender=%s", chat_id, sender_id)
             return
+        notice = self.conversations.handle_command(content, chat_id)
+        if notice is not None:
+            self.conversations.track(
+                chat_id, asyncio.create_task(self._send_notice(chat_id, notice))
+            )
+            return
         task = asyncio.create_task(self._process(chat_id, content))
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        self.conversations.track(chat_id, task)
+
+    async def _send_notice(self, chat_id: str, text: str) -> None:
+        """在后台发送会话命令结果，不调用模型或阻塞 Webhook 确认。"""
+        try:
+            await FeishuReporter(self.channel, chat_id).emit(AgentEvent("notice", text))
+        except Exception:
+            logger.exception("failed to report Feishu command result chat=%s", chat_id)
 
     async def _process(self, chat_id: str, prompt: str) -> None:
         """在聊天对应的持久化会话中运行 Agent，并报告执行错误。"""
@@ -154,7 +168,7 @@ class FeishuAdapter:
         try:
             await self.agent.run(
                 prompt,
-                session_id=f"feishu:{chat_id}",
+                session_id=self.conversations.session_id(chat_id),
                 workdir=workdir,
                 reporter=reporter,
                 approval=self.approval,
