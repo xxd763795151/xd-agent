@@ -444,7 +444,10 @@ class ToolRegistry:
                     decision = ApprovalDecision(False, "rejected", "未配置审批策略，工具未执行")
                 elif read_only_command and self.auto_approve_read_only_commands:
                     await self.reporter.emit(
-                        AgentEvent("notice", f"命令只读免审。\n{description}")
+                        AgentEvent(
+                            "notice",
+                            f"命令只读免审。\n执行命令：{call.arguments['command']}\n{description}",
+                        )
                     )
                     decision = ApprovalDecision(True, "approved", description, "command-review")
                 else:
