@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import copy
+import json
 import os
 import stat
 import sys
@@ -11,10 +12,16 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
-from xd_agent.agent.approval import ApprovalDecision, ApprovalGate, ApprovalRequest
+from xd_agent.agent.approval import (
+    MAX_APPROVAL_BYTES,
+    ApprovalDecision,
+    ApprovalGate,
+    ApprovalRequest,
+)
+from xd_agent.agent.command_review import CommandReviewer
 from xd_agent.agent.models import ToolCall, ToolResult
 from xd_agent.agent.outputs import ToolOutputStore, page_arguments, read_page
-from xd_agent.agent.reporting import NullReporter, Reporter
+from xd_agent.agent.reporting import AgentEvent, NullReporter, Reporter
 from xd_agent.agent.sessions import SessionStore
 from xd_agent.core.config import AgentSettings
 
@@ -350,7 +357,7 @@ class RunCommand:
 
 
 class ToolRegistry:
-    """统一校验、审批和审计工具调用；只有显式声明只读的工具可免审。"""
+    """统一校验、审批和审计工具调用，支持对命令进行独立的只读判断。"""
 
     def __init__(
         self,
@@ -362,6 +369,8 @@ class ToolRegistry:
         store: SessionStore | None = None,
         session_id: str | None = None,
         outputs: ToolOutputStore | None = None,
+        command_reviewer: CommandReviewer | None = None,
+        auto_approve_read_only_commands: bool = True,
     ) -> None:
         self._tools = {tool.name: tool for tool in tools}
         self.approval = approval
@@ -370,6 +379,8 @@ class ToolRegistry:
         self.store = store
         self.session_id = session_id
         self.outputs = outputs
+        self.command_reviewer = command_reviewer
+        self.auto_approve_read_only_commands = auto_approve_read_only_commands
 
     def _result(self, call: ToolCall, output: str, is_error: bool) -> ToolResult:
         """所有成功、拒绝和异常结果均在同一出口限长。"""
@@ -413,11 +424,34 @@ class ToolRegistry:
                             type(self.approval).__name__ if self.approval is not None else "none"
                         ),
                     )
+                description = ""
+                read_only_command = False
+                if call.name == "run_command" and self.command_reviewer is not None:
+                    command = call.arguments.get("command")
+                    if not isinstance(command, str) or not command.strip():
+                        raise ValueError("command must be nonempty text")
+                    # 与人工审批相同的硬限制，不将超大命令发给模型或自动执行。
+                    if len(json.dumps(call.arguments, ensure_ascii=False).encode("utf-8")) > (
+                        MAX_APPROVAL_BYTES
+                    ):
+                        raise ValueError("审批参数超过 64KB，请拆分工具调用后重试")
+                    assessment = await self.command_reviewer.assess(command)
+                    description = assessment.describe()
+                    read_only_command = assessment.read_only
+                    if self.store is not None:
+                        self.store.record_command_assessment(approval_id, description)
                 if self.approval is None:
                     decision = ApprovalDecision(False, "rejected", "未配置审批策略，工具未执行")
+                elif read_only_command and self.auto_approve_read_only_commands:
+                    await self.reporter.emit(
+                        AgentEvent("notice", f"命令只读免审。\n{description}")
+                    )
+                    decision = ApprovalDecision(True, "approved", description, "command-review")
                 else:
                     decision = await self.approval.authorize(
-                        ApprovalRequest(approval_id, copy.deepcopy(call), self.chat_id),
+                        ApprovalRequest(
+                            approval_id, copy.deepcopy(call), self.chat_id, description
+                        ),
                         reporter=self.reporter,
                     )
                 if self.store is not None:

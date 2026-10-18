@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from xd_agent.core.config import load_settings, resolve_config_files
+from xd_agent.core.config import AgentSettings, load_settings, resolve_config_files
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +40,24 @@ def test_cli_is_default_channel(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.delenv("APP_CHANNEL__TYPE", raising=False)
     assert load_settings().channel.type == "cli"
+
+
+def test_command_review_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert AgentSettings().auto_approve_read_only_commands is True
+    (tmp_path / "base.yaml").write_text(
+        "agent:\n  auto_approve_read_only_commands: true\n"
+        "  command_review_timeout_seconds: 15\n"
+        "  command_approval_required_fragments: [sensitive-tool]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test.yaml").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("APP_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_AGENT__AUTO_APPROVE_READ_ONLY_COMMANDS", "false")
+    settings = load_settings().agent
+    assert settings.auto_approve_read_only_commands is False
+    assert settings.command_review_timeout_seconds == 15
+    assert settings.command_approval_required_fragments == ["sensitive-tool"]
 
 
 @pytest.mark.parametrize("channel", ["feishu", "dingtalk", "wecom"])

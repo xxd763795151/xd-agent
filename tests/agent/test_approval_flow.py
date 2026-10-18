@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from xml.etree import ElementTree
@@ -16,18 +17,42 @@ from xd_agent.core.config import AgentSettings, DingTalkSettings, FeishuSettings
 
 
 class Provider:
-    def __init__(self):
+    def __init__(self, operation="write_file"):
         self.calls = 0
+        self.operation = operation
+        self.assessments = 0
 
     async def generate(self, messages, tools):
+        if not tools:
+            self.assessments += 1
+            return ModelReply(
+                Message(
+                    "assistant",
+                    json.dumps(
+                        {
+                            "read_only": True,
+                            "purpose": "查询测试分区信息",
+                            "impact": "不修改文件或系统设置",
+                        }
+                    ),
+                )
+            )
         self.calls += 1
         if self.calls == 1:
             return ModelReply(
                 Message(
                     role="assistant",
                     tool_calls=(
-                        ToolCall(
-                            "write", "write_file", {"path": "note.txt", "content": "approved"}
+                        ToolCall("write", "write_file", {"path": "note.txt", "content": "approved"})
+                        if self.operation == "write_file"
+                        else ToolCall(
+                            "command",
+                            "run_command",
+                            {
+                                "command": "echo rm"
+                                if self.operation == "risky_command"
+                                else "echo partition-info"
+                            },
                         ),
                     ),
                 )
@@ -37,16 +62,27 @@ class Provider:
 
 @pytest.mark.parametrize("channel", ["feishu", "dingtalk", "wecom"])
 @pytest.mark.parametrize("allowed", [True, False])
-def test_channel_approval_controls_real_file_write(tmp_path: Path, channel: str, allowed: bool):
+@pytest.mark.parametrize(
+    "operation", ["write_file", "read_command", "read_command_manual", "risky_command"]
+)
+def test_channel_approval_controls_real_execution(
+    tmp_path: Path, channel: str, allowed: bool, operation: str
+):
     async def scenario():
         store = SessionStore(tmp_path / "sessions.sqlite3")
-        settings = AgentSettings(workspace_dir=tmp_path / "work")
-        agent = AgentService(Provider(), store, settings)
+        settings = AgentSettings(
+            workspace_dir=tmp_path / "work",
+            auto_approve_read_only_commands=operation != "read_command_manual",
+        )
+        provider = Provider(operation)
+        agent = AgentService(provider, store, settings)
+        sent = []
         common = {"allowed_approver_ids": ["admin"], "allowed_sender_ids": ["requester"]}
         if channel == "feishu":
             adapter = FeishuAdapter(agent, store, FeishuSettings(**common), settings)
 
             async def send(chat_id, message):
+                sent.append(str(message))
                 return SimpleNamespace(success=True)
 
             async def disconnect():
@@ -61,11 +97,12 @@ def test_channel_approval_controls_real_file_write(tmp_path: Path, channel: str,
         elif channel == "dingtalk":
             adapter = DingTalkAdapter(agent, store, DingTalkSettings(**common), settings)
             await adapter.http_client.aclose()
-            adapter.http_client = httpx.AsyncClient(
-                transport=httpx.MockTransport(
-                    lambda request: httpx.Response(200, json={"errcode": 0})
-                )
-            )
+
+            def respond(request):
+                sent.append(request.content.decode())
+                return httpx.Response(200, json={"errcode": 0})
+
+            adapter.http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
 
             def message(user, mid, text):
                 return SimpleNamespace(
@@ -82,7 +119,7 @@ def test_channel_approval_controls_real_file_write(tmp_path: Path, channel: str,
             )
 
             async def send(user, text):
-                pass
+                sent.append(text)
 
             adapter.send_text = send
 
@@ -101,7 +138,16 @@ def test_channel_approval_controls_real_file_write(tmp_path: Path, channel: str,
 
         try:
             await adapter._on_message(message("requester", "task", "write a note"))
-            for _ in range(20):
+            if operation == "read_command":
+                await asyncio.gather(*adapter.tasks)
+                assert not adapter.approval.pending
+                record = store.list_approvals()[0]
+                assert record["status"] == "approved"
+                assert record["decided_by"] == "command-review"
+                assert record["execution_status"] == "succeeded"
+                assert provider.assessments == 1
+                return
+            for _ in range(50):
                 if any(pending.ready for pending in adapter.approval.pending.values()):
                     break
                 await asyncio.sleep(0)
@@ -113,14 +159,19 @@ def test_channel_approval_controls_real_file_write(tmp_path: Path, channel: str,
             await adapter._on_message(message("admin", "decision", f"{action} {approval_id}"))
             await asyncio.gather(*adapter.tasks)
             path = settings.workspace_dir / "note.txt"
-            assert path.exists() is allowed
-            if allowed:
-                assert path.read_text(encoding="utf-8") == "approved"
+            if operation == "write_file":
+                assert path.exists() is allowed
+                if allowed:
+                    assert path.read_text(encoding="utf-8") == "approved"
             record = store.get_approval(approval_id)
             assert record["status"] == ("approved" if allowed else "rejected")
             assert record["execution_status"] == ("succeeded" if allowed else "not_started")
             assert record["decided_by"] == "admin"
             assert not adapter.approval.pending
+            if operation != "write_file":
+                notices = "\n".join(sent)
+                assert "作用：" in notices and "影响：" in notices
+                assert provider.assessments == (0 if operation == "risky_command" else 1)
         finally:
             await adapter.stop()
             store.close()

@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -5,8 +6,10 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from xd_agent.agent.models import Message, ModelReply, ToolCall
 from xd_agent.agent.provider import HttpModelProvider
 from xd_agent.agent.sessions import SessionStore
+from xd_agent.agent.tools import RunCommand
 from xd_agent.cli.app import app
 from xd_agent.core.config import load_settings
 
@@ -101,6 +104,101 @@ def test_cli_run_and_chat_require_approval_and_record_selected_policy(
     finally:
         store.close()
     load_settings.cache_clear()
+
+
+@pytest.mark.parametrize("entrypoint", ["run", "chat"])
+@pytest.mark.parametrize(
+    ("shell_command", "enabled", "analysis", "answer", "executed", "asked"),
+    [
+        ("lsblk", True, "valid", "", True, False),
+        ("df -h", False, "valid", "n\n", False, True),
+        ("df -h", False, "valid", "y\n", True, True),
+        ("rm example", True, "unused", "n\n", False, True),
+        ("lsblk", True, "invalid", "n\n", False, True),
+        ("lsblk", True, "error", "n\n", False, True),
+    ],
+)
+def test_cli_command_analysis_and_read_only_switch(
+    tmp_path, monkeypatch, entrypoint, shell_command, enabled, analysis, answer, executed, asked
+):
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("APP_AGENT__API_KEY", "test-key")
+    monkeypatch.setenv("APP_AGENT__WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.setenv("APP_AGENT__SESSION_DB", str(tmp_path / "sessions.sqlite3"))
+    monkeypatch.setenv("APP_AGENT__AUTO_APPROVE_READ_ONLY_COMMANDS", str(enabled).lower())
+    load_settings.cache_clear()
+    calls = []
+    analyses = []
+    executed_commands = []
+
+    async def generate(self, messages, tools):
+        if not tools:
+            analyses.append(messages)
+            if analysis == "error":
+                raise RuntimeError("test model unavailable")
+            content = (
+                "invalid"
+                if analysis == "invalid"
+                else json.dumps(
+                    {
+                        "read_only": True,
+                        "purpose": "查询分区信息",
+                        "impact": "不修改系统分区",
+                    }
+                )
+            )
+            return ModelReply(Message("assistant", content))
+        calls.append(messages)
+        if len(calls) == 1:
+            return ModelReply(
+                Message(
+                    "assistant",
+                    tool_calls=(
+                        ToolCall(
+                            "cmd",
+                            "run_command",
+                            {
+                                "command": shell_command,
+                            },
+                        ),
+                    ),
+                )
+            )
+        return ModelReply(Message("assistant", "任务完成"))
+
+    async def execute(self, arguments):
+        executed_commands.append(arguments["command"])
+        return "sda1"
+
+    monkeypatch.setattr(HttpModelProvider, "generate", generate)
+    monkeypatch.setattr(RunCommand, "execute", execute)
+    args = [entrypoint, "--session", "command-test"]
+    if entrypoint == "run":
+        args.append("查看分区")
+        input_text = answer
+    else:
+        input_text = "查看分区\n" + answer + "/exit\n"
+    try:
+        result = CliRunner().invoke(app, args, input=input_text)
+        assert result.exit_code == 0, result.output
+        assert "任务完成" in result.output
+        assert bool(executed_commands) is executed
+        assert bool(analyses) is (analysis != "unused")
+        assert ("允许执行以上工具调用吗" in result.output) is asked
+        assert "作用：" in result.output and "影响：" in result.output
+        if analysis == "unused":
+            assert "固定高危规则" in result.output
+        if analysis in {"invalid", "error"}:
+            assert "保守回退" in result.output
+        store = SessionStore(tmp_path / "sessions.sqlite3")
+        try:
+            record = store.list_approvals()[0]
+            assert record["status"] == ("approved" if executed else "rejected")
+            assert record["decided_by"] == ("local" if asked else "command-review")
+        finally:
+            store.close()
+    finally:
+        load_settings.cache_clear()
 
 
 @pytest.mark.parametrize("command", ["run", "chat"])

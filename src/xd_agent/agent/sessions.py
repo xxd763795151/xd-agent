@@ -158,6 +158,11 @@ class SessionStore:
             if cursor.rowcount:
                 self._append_approval_event(approval_id, f"execution_{status}", detail=error)
 
+    def record_command_assessment(self, approval_id: str, description: str) -> None:
+        """在执行前保存完整命令分析，人工或自动批准均可追溯判断依据。"""
+        with self._connection:
+            self._append_approval_event(approval_id, "command_assessed", detail=description)
+
     def record_approval_notification(self, approval_id: str) -> None:
         """记录完整参数和批准指令均已成功发送。"""
         with self._connection:

@@ -24,6 +24,7 @@ class ApprovalRequest:
     id: str
     call: ToolCall
     chat_id: str | None
+    description: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -64,7 +65,11 @@ class TerminalApproval:
         if len(args.encode("utf-8")) > MAX_APPROVAL_BYTES:
             return ApprovalDecision(False, "rejected", "审批参数超过 64KB，请拆分工具调用后重试")
         await reporter.emit(
-            AgentEvent("notice", f"审批 {request.id}；工具 {request.call.name} 完整参数：\n{args}")
+            AgentEvent(
+                "notice",
+                f"审批 {request.id}；工具 {request.call.name} 完整参数：\n{args}"
+                + (f"\n{request.description}" if request.description else ""),
+            )
         )
         self.store.record_approval_notification(request.id)
         try:
@@ -123,6 +128,11 @@ class ChatApproval:
         self.pending[request.id] = pending
         try:
             async with asyncio.timeout(self.timeout_seconds):
+                if request.description:
+                    for chunk in _split_arguments(request.description):
+                        await reporter.emit(
+                            AgentEvent("notice", f"审批 {request.id}；{chunk}")
+                        )
                 chunks = _split_arguments(args)
                 for index, chunk in enumerate(chunks, 1):
                     text = (

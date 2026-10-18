@@ -42,6 +42,8 @@ class AgentSettings(BaseModel):
     与 memory_messages 限制上下文；command_timeout_seconds 和
     max_tool_output_chars 限制工具执行；max_exploration_summary_chars 限制调查报告，
     memory_summary_chars 限制滚动历史摘要。价格及 currency 仅用于成本估算。
+    auto_approve_read_only_commands 控制命令只读免审；command_review_timeout_seconds
+    限制独立分析等待时间；command_approval_required_fragments 为附加强制审批片段。
     """
 
     provider: Literal["openai_compatible", "anthropic_compatible"] = "openai_compatible"
@@ -54,6 +56,9 @@ class AgentSettings(BaseModel):
     max_context_chars: int = Field(default=120_000, ge=1_000)
     memory_messages: int = Field(default=40, ge=2)
     command_timeout_seconds: int = Field(default=30, ge=1, le=600)
+    auto_approve_read_only_commands: bool = True
+    command_review_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    command_approval_required_fragments: list[str] = Field(default_factory=list)
     max_tool_output_chars: int = Field(default=8_000, ge=100)
     max_exploration_summary_chars: int = Field(default=3_000, ge=200)
     memory_summary_chars: int = Field(default=6_000, ge=100)

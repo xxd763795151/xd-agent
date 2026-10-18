@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from xd_agent.agent.approval import ApprovalGate
+from xd_agent.agent.approval import ApprovalGate, LocalApproval
+from xd_agent.agent.command_review import CommandReviewer
 from xd_agent.agent.engine import AgentEngine
 from xd_agent.agent.explorer import ExploreWorkspace
 from xd_agent.agent.provider import ModelProvider
@@ -101,6 +102,14 @@ class AgentService:
                     store=self.store,
                     session_id=session_id,
                     outputs=files.outputs,
+                    command_reviewer=(
+                        None
+                        if isinstance(approval, LocalApproval)
+                        else CommandReviewer(
+                            self.provider, self.settings, store=self.store, session_id=session_id
+                        )
+                    ),
+                    auto_approve_read_only_commands=self.settings.auto_approve_read_only_commands,
                 )
                 engine = AgentEngine(self.provider, self.store, registry, self.settings)
                 return await engine.run(

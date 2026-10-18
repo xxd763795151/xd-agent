@@ -13,7 +13,7 @@ uv run --frozen xd-agent chat --session daily
 
 Linux/macOS 请用对应 shell 的环境变量语法。默认模型为智谱的 OpenAI 兼容接口 `glm-4.5-air`。可通过 `APP_AGENT__PROVIDER`、`APP_AGENT__MODEL` 和 `APP_AGENT__BASE_URL` 选择其他 OpenAI 兼容或 Anthropic 兼容服务。价格参数只用于估算成本，应按所选模型实际价格设置。
 
-`run` 默认创建新会话；使用 `--session NAME` 可以继续已有会话。`--dir PATH` 指定工作区，`--plan` 让 Agent 维护 `PLAN.md` 与 `TODO.md`。`chat` 是多轮终端会话，输入 `/exit` 结束。写文件、修改文件和运行命令前默认展示完整参数并逐次确认，空输入默认拒绝；无人值守时可显式加 `--auto-approve` 自动批准。会话存入 `.xd-agent/sessions.sqlite3`，每次运行的简要追踪保存在工作区的 `.xd-agent/traces/`。
+`run` 默认创建新会话；使用 `--session NAME` 可以继续已有会话。`--dir PATH` 指定工作区，`--plan` 让 Agent 维护 `PLAN.md` 与 `TODO.md`。`chat` 是多轮终端会话，输入 `/exit` 结束。写文件、修改文件和需要人工审批的命令会展示完整参数并逐次确认，空输入默认拒绝；命令默认支持经分析后的只读免审。无人值守时可显式加 `--auto-approve` 自动批准全部操作。会话存入 `.xd-agent/sessions.sqlite3`，每次运行的简要追踪保存在工作区的 `.xd-agent/traces/`。
 
 模型服务返回 HTTP 错误、请求超时或网络异常时，`run` / `chat` 默认只记录一条包含处理建议的错误日志，并以退出码 `5` 结束；HTTP 错误会保留状态码和可用的服务端错误码。需要排查堆栈时使用 `xd-agent run "任务" --debug` 或 `xd-agent chat --debug`。HTTP 429 表示请求受到限制，需结合错误码检查服务商的并发、速率及配额限制；当前不会自动重试请求。
 
@@ -31,9 +31,20 @@ agent:
   model: glm-4.5-air
   workspace_dir: workspace
   max_turns: 30
+  auto_approve_read_only_commands: true
+  command_review_timeout_seconds: 30
+  command_approval_required_fragments: []
 ```
 
 `channel.type` 支持 `cli`、`feishu`、`dingtalk` 和 `wecom`。各渠道属性均可写入 `config/base.yaml` 或对应环境的 YAML，环境文件按字段覆盖基础文件；也可用 `APP_CHANNEL__...` 环境变量覆盖。默认配置在 `config/base.yaml` 列出了全部渠道字段。选中渠道时才要求该渠道的必需凭据和审批人 ID。
+
+命令审批共用以下流程，适用于 CLI、飞书、钉钉和企业微信：
+
+1. 先检查 `src/xd_agent/agent/command_review.py` 中的固定高危规则。包含删除、磁盘/分区操作、文件写入和权限变更、系统/服务/账户操作、软件安装、远程传输、Git 变更、解释器或动态执行等风险特征时，直接转人工审批，使用固定的作用与影响说明，不请求 LLM。规则保守匹配整个命令，包含参数和引号内容，因此可能将部分无害命令也送审。
+2. 其余命令使用当前配置的模型独立分析完整命令的作用、影响和是否只读；不向分析请求提供工具或任务历史。仅在返回有效且明确的只读结论时自动批准，并展示只读免审说明。模型请求失败、超时、输出格式无效或不能确认只读时，回退人工审批。
+3. 人工审批消息包含完整参数及命令的作用、影响和判断来源。关闭 `agent.auto_approve_read_only_commands`（或设置 `APP_AGENT__AUTO_APPROVE_READ_ONLY_COMMANDS=false`）后，每条命令均需人工审批，仍会执行上述分析并补充说明；固定高危规则命中时仍不询问 LLM。文件读取等原有只读工具的免审行为不受该开关影响。
+
+`agent.command_review_timeout_seconds` 控制分析超时，默认 30 秒。`agent.command_approval_required_fragments` 可增加必须审批的片段，例如 `["my-sensitive-tool"]`；按大小写不敏感的包含关系匹配，不能移除内置规则。LLM 分析会产生额外请求和 token 用量，计入当前会话。它是基于命令文本的风险判断，不能穷举所有命令和运行环境，也不能替代操作系统权限或沙箱隔离；不希望依赖此判断时可关闭只读免审。
 
 例如，在 `config/production.yaml` 中选择钉钉并配置非密钥属性：
 
@@ -64,7 +75,7 @@ $env:APP_CHANNEL__FEISHU__ALLOWED_APPROVER_IDS = '["ou_xxx"]'
 uv run --frozen --extra feishu uvicorn xd_agent.web.app:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-将飞书事件请求地址指向 `POST /webhook/event`，订阅消息接收事件，并授予机器人收发消息权限。默认仅 `allowed_approver_ids` 中的用户可以发起任务；如需将发起人与审批人分开，可另设 `APP_CHANNEL__FEISHU__ALLOWED_SENDER_IDS`。飞书的写文件、编辑文件和命令工具均需审批，审批消息只能由配置的审批人在原会话中回复。请求超时后会拒绝执行。Webhook 的签名校验、事件解密和消息归一化交给飞书 Channel SDK 的严格模式处理。
+将飞书事件请求地址指向 `POST /webhook/event`，订阅消息接收事件，并授予机器人收发消息权限。默认仅 `allowed_approver_ids` 中的用户可以发起任务；如需将发起人与审批人分开，可另设 `APP_CHANNEL__FEISHU__ALLOWED_SENDER_IDS`。飞书的写文件、编辑文件和未通过只读免审的命令需人工审批，审批消息只能由配置的审批人在原会话中回复。请求超时后会拒绝执行。Webhook 的签名校验、事件解密和消息归一化交给飞书 Channel SDK 的严格模式处理。
 
 飞书的审批等待和同会话执行锁位于进程内，审批快照及审计事件保存到 SQLite。部署飞书模式时请使用单个 Uvicorn 工作进程。
 
@@ -105,7 +116,7 @@ uv run --frozen --extra wecom uvicorn xd_agent.web.app:create_app --factory --ho
 
 审批请求会完整展示工具参数，长参数按 UTF-8 字节数分段，全部发送成功后才接受批准。参数超过 64KB 时会拒绝执行并要求拆分调用，不会截断内容后继续执行。通知发送失败、超时、拒绝或任务取消时，尚未获批的工具不会执行。
 
-审批快照和审计事件分别保存在会话数据库的 `approvals`、`approval_events` 表中，包括会话、工具调用 ID、完整参数、审批策略、审批人、决定时间、拒绝原因、非法或重复回复，以及工具执行开始、完成、失败和中断记录。本地自动放行也会记录。服务重启后，未完成审批会失效；已批准但没有确认完成的执行会标记为中断，需重新检查实际状态。旧审批 ID 不能继续批准或自动恢复执行。
+审批快照和审计事件分别保存在会话数据库的 `approvals`、`approval_events` 表中，包括会话、工具调用 ID、完整参数、审批策略、审批人、决定时间、拒绝原因、非法或重复回复，以及工具执行开始、完成、失败和中断记录。命令分析说明保存在 `command_assessed` 事件中；只读自动批准的 `decided_by` 为 `command-review`。本地自动放行也会记录。服务重启后，未完成审批会失效；已批准但没有确认完成的执行会标记为中断，需重新检查实际状态。旧审批 ID 不能继续批准或自动恢复执行。
 
 ## 工具与评测
 
@@ -119,9 +130,9 @@ uv run --frozen --extra wecom uvicorn xd_agent.web.app:create_app --factory --ho
 
 主会话和探索助手在达到消息数或字符预算时，会先调用模型压缩旧历史，再移除对应消息；一个助手消息中的工具调用及其结果作为整体保留或压缩。摘要要求保留用户目标与约束、决策、文件位置、验证结果和未完成事项，主会话摘要通过 `session_memory` 表持久化，原始 `messages` 不删除。`memory_summary_chars` 默认 6000 字符，有效摘要预算不超过上下文的八分之一。摘要模型调用会产生额外用量，并计入主会话；摘要请求分块限长，失败时保留原历史并终止本次运行。摘要仍可能省略细节，需要时应重新核实文件和工具存档。
 
-所有工具调用都在 `ToolRegistry.execute()` 的执行入口检查审批。新增工具默认需要审批，只有显式声明 `read_only = True` 的无副作用工具才能免审。只读探索助手仅注册文件读取、列表和搜索工具。
+所有工具调用都在 `ToolRegistry.execute()` 的执行入口检查审批。新增工具默认需要审批；显式声明 `read_only = True` 的无副作用工具免审，`run_command` 则按上述独立分析流程决定是否免人工审批。只读探索助手仅注册文件读取、列表和搜索工具。
 
-CLI 的 `run`、`chat` 默认使用 `TerminalApproval` 逐次确认，只有显式传入 `--auto-approve` 才使用 `LocalApproval` 自动放行；`benchmark` 为无人值守评测，显式使用 `LocalApproval`。这些策略均记录到审批审计。代码调用 `AgentService.run()` 时必须明确传入 `approval`；遗漏会报错，直接调用没有审批策略的工具注册表也不能执行有副作用的工具。
+CLI 的 `run`、`chat` 默认对未通过只读免审的命令使用 `TerminalApproval` 逐次确认。显式传入 `--auto-approve` 时使用 `LocalApproval` 自动放行全部操作，并跳过命令分析；`benchmark` 同样使用这一显式无人值守策略。这一选项独立于只读免审开关，仍可自动批准高危命令。这些策略均记录到审批审计。代码调用 `AgentService.run()` 时必须明确传入 `approval`；遗漏会报错，直接调用没有审批策略的工具注册表也不能执行有副作用的工具。
 
 评测使用 JSON 文件描述准备文件、任务和文件内容断言，不依赖平台特定的 shell 脚本：
 
