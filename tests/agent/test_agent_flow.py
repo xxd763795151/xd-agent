@@ -12,8 +12,9 @@ from xd_agent.core.config import AgentSettings
 
 
 class FakeProvider:
-    def __init__(self) -> None:
+    def __init__(self, tool_content: str = "") -> None:
         self.calls = 0
+        self.tool_content = tool_content
 
     async def generate(self, messages, tools):
         self.calls += 1
@@ -22,6 +23,7 @@ class FakeProvider:
             return ModelReply(
                 Message(
                     role="assistant",
+                    content=self.tool_content,
                     tool_calls=(
                         ToolCall("call-1", "write_file", {"path": "note.txt", "content": "hello"}),
                     ),
@@ -41,10 +43,11 @@ class CaptureReporter:
         self.events.append(event)
 
 
-def test_agent_runs_tool_and_persists_session(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tool_content", ["", " ", "\r\n\t", "\u3000"])
+def test_agent_runs_tool_and_persists_session(tmp_path: Path, tool_content: str) -> None:
     async def scenario() -> None:
         store = SessionStore(tmp_path / "sessions.sqlite3")
-        provider = FakeProvider()
+        provider = FakeProvider(tool_content)
         settings = AgentSettings(max_turns=3)
         reporter = CaptureReporter()
         service = AgentService(provider, store, settings)
@@ -64,6 +67,7 @@ def test_agent_runs_tool_and_persists_session(tmp_path: Path) -> None:
             "message",
         ]
         snapshot = store.get_or_create("cli:test", workdir)
+        assert snapshot.messages[1].content == tool_content
         assert [message.role for message in snapshot.messages] == [
             "user",
             "assistant",

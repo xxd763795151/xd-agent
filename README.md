@@ -38,6 +38,8 @@ agent:
 
 `channel.type` 支持 `cli`、`feishu`、`dingtalk` 和 `wecom`。各渠道属性均可写入 `config/base.yaml` 或对应环境的 YAML，环境文件按字段覆盖基础文件；也可用 `APP_CHANNEL__...` 环境变量覆盖。默认配置在 `config/base.yaml` 列出了全部渠道字段。选中渠道时才要求该渠道的必需凭据和审批人 ID。
 
+配置好渠道后，用 `xd-agent serve` 启动 HTTP 服务及所选消息渠道，按 Ctrl+C 停止。监听地址和端口默认读取 `http.host`、`http.port`（也支持 `APP_HTTP__HOST`、`APP_HTTP__PORT`），可用 `serve --host 0.0.0.0 --port 8000` 覆盖。全局选项放在子命令之前，例如 `xd-agent --env production --config-dir C:/xd-agent/config serve`。`serve` 固定使用单个工作进程；`channel.type=cli` 时只提供 HTTP 接口，终端对话仍使用 `chat`。
+
 命令审批共用以下流程，适用于 CLI、飞书、钉钉和企业微信：
 
 1. 先检查 `src/xd_agent/agent/command_review.py` 中的固定高危规则。包含删除、磁盘/分区操作、文件写入和权限变更、系统/服务/账户操作、软件安装、远程传输、Git 变更、解释器或动态执行等风险特征时，直接转人工审批，使用固定的作用与影响说明，不请求 LLM。规则保守匹配整个命令，包含参数和引号内容，因此可能将部分无害命令也送审。
@@ -72,7 +74,7 @@ $env:APP_CHANNEL__FEISHU__APP_SECRET = "..."
 $env:APP_CHANNEL__FEISHU__VERIFICATION_TOKEN = "..."
 $env:APP_CHANNEL__FEISHU__ENCRYPT_KEY = "..."
 $env:APP_CHANNEL__FEISHU__ALLOWED_APPROVER_IDS = '["ou_xxx"]'
-uv run --frozen --extra feishu uvicorn xd_agent.web.app:create_app --factory --host 0.0.0.0 --port 8000
+uv run --frozen --extra feishu xd-agent serve --host 0.0.0.0 --port 8000
 ```
 
 将飞书事件请求地址指向 `POST /webhook/event`，订阅消息接收事件，并授予机器人收发消息权限。默认仅 `allowed_approver_ids` 中的用户可以发起任务；如需将发起人与审批人分开，可另设 `APP_CHANNEL__FEISHU__ALLOWED_SENDER_IDS`。飞书的写文件、编辑文件和未通过只读免审的命令需人工审批，审批消息只能由配置的审批人在原会话中回复。请求超时后会拒绝执行。Webhook 的签名校验、事件解密和消息归一化交给飞书 Channel SDK 的严格模式处理。
@@ -89,10 +91,14 @@ $env:APP_CHANNEL__TYPE = "dingtalk"
 $env:APP_CHANNEL__DINGTALK__CLIENT_ID = "dingxxx"
 $env:APP_CHANNEL__DINGTALK__CLIENT_SECRET = "..."
 $env:APP_CHANNEL__DINGTALK__ALLOWED_APPROVER_IDS = '["admin-user-id"]'
-uv run --frozen --extra dingtalk uvicorn xd_agent.web.app:create_app --factory --host 0.0.0.0 --port 8000
+uv run --frozen --extra dingtalk xd-agent serve
 ```
 
 钉钉消息按会话 ID 维护上下文，使用收到消息时提供的 `sessionWebhook` 发送进度和审批提示。`allowed_approver_ids` 和 `allowed_sender_ids` 填机器人消息中的 `senderStaffId`。
+
+如果日志出现 `DingTalk reply delivery failed`，表示回复发送失败；同一行会保留 HTTP 状态及钉钉返回的 `errcode`、`errmsg` 等诊断字段，Webhook 会话凭据会脱敏。请根据具体错误码检查接口权限、会话 Webhook 有效期或发送限制；Stream 的 `PING` 日志本身不是发送失败原因。
+
+工具调用回复中的正文可能只有空格或换行；Agent 会跳过这类纯空白正文，继续工具和审批流程，避免钉钉以 `400202: miss param : text->content` 拒绝空白消息。
 
 ## 企业微信自建应用
 
@@ -107,7 +113,7 @@ $env:APP_CHANNEL__WECOM__AGENT_ID = "1000001"
 $env:APP_CHANNEL__WECOM__TOKEN = "..."
 $env:APP_CHANNEL__WECOM__ENCODING_AES_KEY = "..."
 $env:APP_CHANNEL__WECOM__ALLOWED_APPROVER_IDS = '["admin-user-id"]'
-uv run --frozen --extra wecom uvicorn xd_agent.web.app:create_app --factory --host 0.0.0.0 --port 8000
+uv run --frozen --extra wecom xd-agent serve --host 0.0.0.0 --port 8000
 ```
 
 企业微信仅处理发给该自建应用的文本消息；按成员 UserID 保存会话，使用应用消息接口发送回复。回调验证和消息接收均校验签名并解密。审批人可以在自己的应用单聊中回复审批 ID。

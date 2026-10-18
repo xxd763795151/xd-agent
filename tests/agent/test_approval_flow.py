@@ -42,6 +42,7 @@ class Provider:
             return ModelReply(
                 Message(
                     role="assistant",
+                    content=" \n\t",
                     tool_calls=(
                         ToolCall("write", "write_file", {"path": "note.txt", "content": "approved"})
                         if self.operation == "write_file"
@@ -99,6 +100,10 @@ def test_channel_approval_controls_real_execution(
             await adapter.http_client.aclose()
 
             def respond(request):
+                if not json.loads(request.content)["text"]["content"].strip():
+                    return httpx.Response(
+                        200, json={"errcode": 400202, "errmsg": "miss param : text->content"}
+                    )
                 sent.append(request.content.decode())
                 return httpx.Response(200, json={"errcode": 0})
 

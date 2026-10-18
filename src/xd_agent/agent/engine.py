@@ -106,7 +106,7 @@ class AgentEngine:
                 history.append(message)
                 turn_trace: dict[str, Any] = {"turn": turn, "tools": []}
                 trace["turns"].append(turn_trace)
-                if message.content:
+                if message.content.strip():
                     await reporter.emit(AgentEvent("message", message.content))
                 if not message.tool_calls:
                     return message.content

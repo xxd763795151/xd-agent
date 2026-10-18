@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import re
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
@@ -15,6 +16,10 @@ from xd_agent.agent.sessions import SessionStore
 from xd_agent.core.config import AgentSettings, DingTalkSettings, resolve_project_path
 
 logger = logging.getLogger(__name__)
+
+
+class DingTalkSendError(RuntimeError):
+    """钉钉消息未能送达；错误信息保留接口诊断并隐藏会话凭据。"""
 
 
 class DingTalkReporter:
@@ -45,12 +50,45 @@ class DingTalkReporter:
                 text += f"：{event.text}"
         else:
             text = event.text
-        response = await self.client.post(
-            self.session_webhook, json={"msgtype": "text", "text": {"content": text}}
-        )
-        response.raise_for_status()
-        if response.json().get("errcode") != 0:
-            raise RuntimeError("failed to send DingTalk message")
+        if not text.strip():
+            return
+        try:
+            response = await self.client.post(
+                self.session_webhook, json={"msgtype": "text", "text": {"content": text}}
+            )
+        except httpx.RequestError as exc:
+            # HTTP 异常的默认文本可能包含带会话凭据的完整 URL。
+            raise DingTalkSendError(
+                f"failed to send DingTalk message: {type(exc).__name__}"
+            ) from None
+        try:
+            data = response.json()
+        except ValueError:
+            raise DingTalkSendError(
+                f"failed to send DingTalk message: HTTP {response.status_code}, non-JSON response"
+            ) from None
+        if not isinstance(data, dict):
+            raise DingTalkSendError(
+                f"failed to send DingTalk message: HTTP {response.status_code}, invalid response"
+            )
+        if response.is_success and data.get("errcode") == 0:
+            return
+        details = [f"HTTP {response.status_code}"]
+        for key in ("errcode", "errmsg", "code", "message", "request_id", "requestId"):
+            if key in data:
+                details.append(f"{key}={self._safe_detail(data[key])}")
+        if "errcode" not in data:
+            details.append("missing errcode")
+        raise DingTalkSendError(f"failed to send DingTalk message: {', '.join(details)}")
+
+    def _safe_detail(self, value: Any) -> str:
+        """仅输出限长的接口诊断字段，移除可能回显的 Webhook 和查询凭据。"""
+        detail = str(value).replace(self.session_webhook, "[redacted webhook]")
+        for _, secret in parse_qsl(urlsplit(self.session_webhook).query):
+            if secret:
+                detail = detail.replace(secret, "[redacted]")
+        detail = re.sub(r"https?://\S+", "[redacted URL]", detail)
+        return " ".join(detail.split())[:500]
 
 
 class DingTalkAdapter:
@@ -99,6 +137,7 @@ class DingTalkAdapter:
 
             async def process(self, callback: Any) -> tuple[int, str]:
                 """归一化消息并向 Stream 确认已接收。"""
+                logger.info("DingTalk callback received topic=%s", sdk.ChatbotMessage.TOPIC)
                 message = sdk.ChatbotMessage.from_dict(callback.data)
                 await adapter._on_message(message)
                 return sdk.AckMessage.STATUS_OK, "OK"
@@ -119,6 +158,7 @@ class DingTalkAdapter:
                     await asyncio.sleep(0.1)
         except TimeoutError as exc:
             raise RuntimeError("DingTalk Stream did not connect within 30 seconds") from exc
+        logger.info("DingTalk Stream connected topic=%s", sdk.ChatbotMessage.TOPIC)
 
     def _stream_finished(self, task: asyncio.Task[None]) -> None:
         """记录意外结束的 Stream 任务异常。"""
@@ -149,15 +189,32 @@ class DingTalkAdapter:
 
     async def _on_message(self, message: Any) -> None:
         """过滤并去重文本消息，处理审批或启动授权用户的任务。"""
+        logger.info(
+            "DingTalk message received type=%s chat=%s sender=%s message_id=%s",
+            message.message_type,
+            message.conversation_id,
+            message.sender_staff_id,
+            message.message_id,
+        )
         if message.message_type != "text" or message.text is None:
+            logger.info("DingTalk message ignored reason=unsupported_message_type")
             return
         chat_id = str(message.conversation_id or "")
         sender_id = str(message.sender_staff_id or "")
         message_id = str(message.message_id or "")
         content = str(message.text.content or "").strip()
         if not chat_id or not sender_id or not message_id or not content:
+            logger.warning(
+                "DingTalk message ignored reason=missing_fields "
+                "has_chat=%s has_sender=%s has_message_id=%s has_content=%s",
+                bool(chat_id),
+                bool(sender_id),
+                bool(message_id),
+                bool(content),
+            )
             return
         if not self.sessions.claim_event("dingtalk", message_id):
+            logger.info("DingTalk message ignored reason=duplicate message_id=%s", message_id)
             return
         tokens = content.split()
         if len(tokens) == 2 and tokens[0].lower() in {"approve", "reject"}:
@@ -172,6 +229,7 @@ class DingTalkAdapter:
         if sender_id not in allowed_senders:
             logger.warning("DingTalk sender denied chat=%s sender=%s", chat_id, sender_id)
             return
+        logger.info("DingTalk task queued chat=%s message_id=%s", chat_id, message_id)
         task = asyncio.create_task(self._process(chat_id, content, str(message.session_webhook)))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -188,6 +246,8 @@ class DingTalkAdapter:
                 approval=self.approval,
                 chat_id=chat_id,
             )
+        except DingTalkSendError as exc:
+            logger.error("DingTalk reply delivery failed chat=%s: %s", chat_id, exc)
         except Exception:
             logger.exception("DingTalk agent run failed chat=%s", chat_id)
             if "reporter" in locals():

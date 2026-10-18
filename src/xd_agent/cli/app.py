@@ -7,6 +7,7 @@ import typer
 from xd_agent.cli.commands.agent import chat, run
 from xd_agent.cli.commands.benchmark import benchmark
 from xd_agent.cli.commands.greeting import greet
+from xd_agent.cli.commands.serve import serve
 from xd_agent.core.config import load_settings
 
 app = typer.Typer(no_args_is_help=True, help="xd-agent command-line interface")
@@ -31,6 +32,7 @@ app.command("greet")(greet)
 app.command("run")(run)
 app.command("chat")(chat)
 app.command("benchmark")(benchmark)
+app.command("serve")(serve)
 
 
 def main() -> None:
