@@ -36,6 +36,9 @@ pip-wheel-metadata/
 .xd-agent/
 /workspace/
 
+# Local backups
+/.local-backups/
+
 # Runtime logs
 *.log
 *.log.*
