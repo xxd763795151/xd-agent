@@ -11,7 +11,7 @@ uv run --frozen xd-agent run "检查当前项目并给出改进建议"
 uv run --frozen xd-agent chat --session daily
 ```
 
-Linux/macOS 请用对应 shell 的环境变量语法。默认模型为智谱的 OpenAI 兼容接口 `glm-4.5-air`。可通过 `APP_AGENT__PROVIDER`、`APP_AGENT__MODEL` 和 `APP_AGENT__BASE_URL` 选择其他 OpenAI 兼容或 Anthropic 兼容服务。价格参数只用于估算成本，应按所选模型实际价格设置。
+Linux/macOS 请用对应 shell 的环境变量语法。默认模型为智谱的 OpenAI 兼容接口 `glm-5.3`。可通过 `APP_AGENT__PROVIDER`、`APP_AGENT__MODEL` 和 `APP_AGENT__BASE_URL` 选择其他 OpenAI 兼容或 Anthropic 兼容服务。价格参数只用于估算成本，应按所选模型实际价格设置。
 
 `run` 默认创建新会话；使用 `--session NAME` 可以继续已有会话。`--dir PATH` 指定工作区，`--plan` 让 Agent 维护 `PLAN.md` 与 `TODO.md`。`chat` 是多轮终端会话，输入 `/new` 开启新会话，`/exit` 结束。写文件、修改文件和需要人工审批的命令会展示完整参数并逐次确认，空输入默认拒绝；命令默认支持经分析后的只读免审。无人值守时可显式加 `--auto-approve` 自动批准全部操作。会话存入 `.xd-agent/sessions.sqlite3`，每次运行的简要追踪保存在工作区的 `.xd-agent/traces/`。
 
@@ -28,7 +28,7 @@ channel:
   type: cli
 agent:
   provider: openai_compatible
-  model: glm-4.5-air
+  model: glm-5.3
   workspace_dir: workspace
   max_turns: 30
   auto_approve_read_only_commands: true

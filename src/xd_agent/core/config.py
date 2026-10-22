@@ -47,7 +47,7 @@ class AgentSettings(BaseModel):
     """
 
     provider: Literal["openai_compatible", "anthropic_compatible"] = "openai_compatible"
-    model: str = "glm-4.5-air"
+    model: str = "glm-5.3"
     api_key: SecretStr | None = None
     base_url: str | None = None
     workspace_dir: Path = Path("workspace")

@@ -34,7 +34,7 @@ channel:
     approval_timeout_seconds: 300
 agent:
   provider: openai_compatible
-  model: glm-4.5-air
+  model: glm-5.3
   workspace_dir: workspace
   session_db: .xd-agent/sessions.sqlite3
   max_turns: 30
